@@ -36,6 +36,7 @@ function route(string $method, string $action, array $in): void
             'needSetup' => $userCount === 0,
             'user' => $u ? user_public($u) : null,
             'csrf' => csrf_token(),
+            'version' => APP_VERSION,
         ]);
     }
 
@@ -168,6 +169,21 @@ function route(string $method, string $action, array $in): void
 
     // Ab hier nur Admin
     if (!$isAdmin) fail('Nur für Admins.', 403);
+
+    if ($method === 'GET' && $action === 'backup') {
+        // Vollständige, konsistente Kopie der Datenbank zum Herunterladen
+        $tmp = tempnam(sys_get_temp_dir(), 'mb');
+        @unlink($tmp);
+        $pdo->exec('VACUUM INTO ' . $pdo->quote($tmp));
+        $name = 'monatsbuch-sicherung-' . date('Y-m-d') . '.sqlite';
+        header('Content-Type: application/vnd.sqlite3');
+        header('Content-Disposition: attachment; filename="' . $name . '"');
+        header('Content-Length: ' . filesize($tmp));
+        header('Cache-Control: no-store');
+        readfile($tmp);
+        @unlink($tmp);
+        exit;
+    }
 
     if ($method === 'POST' && $action === 'createUser') {
         $id = create_user($in['username'] ?? '', $in['name'] ?? '', $in['password'] ?? '', !empty($in['isAdmin']));

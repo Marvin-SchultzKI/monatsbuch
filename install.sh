@@ -9,7 +9,8 @@
 #   3. Fügt NUR hinzu: PHP-FPM + SQLite, Ordner /var/www/monatsbuch, eine eigene
 #      Webserver-Konfiguration für die Domain, ein HTTPS-Zertifikat.
 #      Bestehende Webseiten und Konfigurationen werden nicht verändert.
-#   Erneut ausführen = Update. Die Daten in /var/www/monatsbuch/data bleiben erhalten.
+#   4. Richtet automatische Updates (alle 10 Minuten) und eine tägliche Sicherung ein.
+#   Erneut ausführen ist jederzeit möglich. Die Daten in /var/www/monatsbuch/data bleiben erhalten.
 set -euo pipefail
 
 DOMAIN="${DOMAIN:-monatebuch.duckdns.org}"
@@ -83,12 +84,14 @@ say ""
 say "${B}Geplant:${N}"
 if [ $UPDATE -eq 1 ]; then
   say "  • App-Dateien in $APP_DIR aktualisieren (data/ bleibt unverändert)"
+  say "  • Automatische Updates und tägliche Sicherung einrichten"
 else
   [ "$MODE" = nginx-neu ] && say "  • nginx installieren (Port 80/443 sind frei)"
   say "  • Pakete hinzufügen: php-fpm, php-sqlite3, php-mbstring, certbot"
   say "  • App nach $APP_DIR kopieren"
   say "  • Eigene Konfiguration nur für $DOMAIN anlegen (andere Seiten bleiben unberührt)"
   say "  • HTTPS-Zertifikat von Let's Encrypt für $DOMAIN"
+  say "  • Automatische Updates und tägliche Sicherung einrichten"
 fi
 say ""
 if [ "${YES:-}" != 1 ]; then
@@ -128,6 +131,7 @@ mkdir -p "$APP_DIR/data"
 [ -f "$APP_DIR/data/.htaccess" ] || cp "$SRC/data/.htaccess" "$APP_DIR/data/.htaccess" 2>/dev/null || true
 chown -R root:root "$APP_DIR"; find "$APP_DIR" -type d -exec chmod 755 {} +; find "$APP_DIR" -type f -exec chmod 644 {} +
 chown -R www-data:www-data "$APP_DIR/data"; chmod 750 "$APP_DIR/data"
+svc reload "php${PHPV}-fpm" 2>/dev/null || true
 ok "App liegt in $APP_DIR (Version $(grep -oE "APP_VERSION = '[^']+'" "$APP_DIR/lib.php" | cut -d"'" -f2))"
 
 # ---------- 5. Webserver ----------
@@ -209,7 +213,142 @@ EOF
   fi
 fi
 
-# ---------- 6. Prüfen ----------
+# ---------- 6. Automatische Updates und tägliche Sicherung ----------
+REPO="${REPO:-Marvin-SchultzKI/monatsbuch}"
+mkdir -p /var/lib/monatsbuch /var/backups/monatsbuch
+chmod 700 /var/backups/monatsbuch
+cat > /etc/monatsbuch.env <<EOF
+DOMAIN=$DOMAIN
+APP_DIR=$APP_DIR
+REPO=$REPO
+PHPV=$PHPV
+EOF
+
+cat > /usr/local/sbin/monatsbuch-update <<'EOS'
+#!/usr/bin/env bash
+# Holt neue App-Versionen aus GitHub. Nur App-Dateien, nie data/.
+# Prüft PHP-Syntax vorher und die App nachher; bei Problemen zurück zur alten Version.
+set -euo pipefail
+. /etc/monatsbuch.env
+STATE=/var/lib/monatsbuch
+log() { echo "$*"; command -v logger >/dev/null && logger -t monatsbuch-update "$*" || true; }
+reload_php() { # PHP-Zwischenspeicher (OPcache) leeren, sonst laufen noch alte Dateien
+  systemctl reload "php${PHPV}-fpm" 2>/dev/null || service "php${PHPV}-fpm" reload >/dev/null 2>&1 || true
+  sleep 2
+}
+health() { # $1 = erwartete Version
+  local r
+  r=$(curl -sk --max-time 15 --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api.php?action=state" 2>/dev/null || true)
+  echo "$r" | grep -q '"csrf"' || r=$(curl -s --max-time 15 -H "Host: $DOMAIN" "http://127.0.0.1/api.php?action=state" 2>/dev/null || true)
+  echo "$r" | grep -q '"csrf"' && echo "$r" | grep -qF "\"version\":\"$1\""
+}
+if [ -n "${SRC_TGZ:-}" ]; then SHA="lokal-$(sha256sum "$SRC_TGZ" | cut -c1-12)"; else
+  SHA=$(curl -fsS --max-time 20 -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/$REPO/commits/main" || true)
+  [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { log "GitHub nicht erreichbar, nächster Versuch später"; exit 0; }
+fi
+[ "$(cat $STATE/deployed 2>/dev/null)" = "$SHA" ] && [ "${FORCE:-}" != 1 ] && exit 0
+[ "$(cat $STATE/failed 2>/dev/null)" = "$SHA" ] && [ "${FORCE:-}" != 1 ] && exit 0
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+if [ -n "${SRC_TGZ:-}" ]; then cp "$SRC_TGZ" "$TMP/a.tgz"; else curl -fsSL --max-time 60 "https://codeload.github.com/$REPO/tar.gz/$SHA" -o "$TMP/a.tgz"; fi
+tar -xzf "$TMP/a.tgz" -C "$TMP"
+SRC=$(find "$TMP" -mindepth 2 -maxdepth 2 -type d -name app | head -1)
+[ -n "$SRC" ] && [ -f "$SRC/index.php" ] || { log "Download unvollständig – Update übersprungen"; exit 1; }
+while IFS= read -r -d '' f; do php -l "$f" >/dev/null 2>&1 || { echo "$SHA" > "$STATE/failed"; log "PHP-Fehler in ${f#$SRC/} – Update übersprungen"; exit 1; }; done < <(find "$SRC" -name '*.php' -print0)
+# alte Version sichern
+rm -rf "$STATE/prev"; mkdir -p "$STATE/prev"
+( cd "$APP_DIR" && find . -mindepth 1 -maxdepth 1 ! -name data -exec cp -a {} "$STATE/prev/" \; )
+deploy() { # $1 = Quelle
+  find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+  ( cd "$1" && find . -mindepth 1 -maxdepth 1 ! -name data -exec cp -a {} "$APP_DIR"/ \; )
+  chown -R root:root "$APP_DIR"; find "$APP_DIR" -path "$APP_DIR/data" -prune -o -type d -exec chmod 755 {} + ; find "$APP_DIR" -path "$APP_DIR/data" -prune -o -type f -exec chmod 644 {} +
+  chown -R www-data:www-data "$APP_DIR/data"; chmod 750 "$APP_DIR/data"
+}
+NEWV=$(grep -oE "APP_VERSION = '[^']+'" "$SRC/lib.php" | cut -d"'" -f2)
+deploy "$SRC"
+reload_php
+if health "$NEWV"; then
+  echo "$SHA" > "$STATE/deployed"
+  log "Update auf ${SHA:0:7} installiert ($(grep -oE "APP_VERSION = '[^']+'" "$APP_DIR/lib.php" | cut -d"'" -f2))"
+else
+  deploy "$STATE/prev"
+  reload_php
+  echo "$SHA" > "$STATE/failed"
+  log "Neue Version ${SHA:0:7} antwortet nicht – alte Version wiederhergestellt"
+  exit 1
+fi
+EOS
+chmod 755 /usr/local/sbin/monatsbuch-update
+
+cat > /usr/local/sbin/monatsbuch-backup <<'EOS'
+#!/usr/bin/env bash
+# Tägliche Sicherung der Datenbank, 30 Tage aufbewahrt.
+set -euo pipefail
+. /etc/monatsbuch.env
+DEST=/var/backups/monatsbuch
+CFG="$APP_DIR/data/config.local.php"
+[ -f "$CFG" ] || { echo "Noch keine Datenbank – nichts zu sichern"; exit 0; }
+F="$DEST/monatsbuch-$(date +%F_%H%M).sqlite"
+php -r '$c = require $argv[1]; $db = new PDO("sqlite:" . $c["db_path"]); $db->exec("VACUUM INTO " . $db->quote($argv[2])); $t = new PDO("sqlite:" . $argv[2]); $ok = $t->query("PRAGMA integrity_check")->fetchColumn(); if ($ok !== "ok") { fwrite(STDERR, "Prüfung fehlgeschlagen\n"); exit(1); }' "$CFG" "$F"
+cp "$CFG" "$DEST/config.local.php"
+gzip -f "$F"
+chmod 600 "$F.gz"
+find "$DEST" -name 'monatsbuch-*.sqlite.gz' -mtime +30 -delete
+echo "Sicherung: $F.gz"
+command -v logger >/dev/null && logger -t monatsbuch-backup "Sicherung $F.gz erstellt" || true
+EOS
+chmod 755 /usr/local/sbin/monatsbuch-backup
+
+if [ -d /run/systemd/system ]; then
+  cat > /etc/systemd/system/monatsbuch-update.service <<'EOF'
+[Unit]
+Description=SM Monatsbuch – nach neuer Version suchen
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/monatsbuch-update
+EOF
+  cat > /etc/systemd/system/monatsbuch-update.timer <<'EOF'
+[Unit]
+Description=SM Monatsbuch – alle 10 Minuten nach Updates suchen
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+[Install]
+WantedBy=timers.target
+EOF
+  cat > /etc/systemd/system/monatsbuch-backup.service <<'EOF'
+[Unit]
+Description=SM Monatsbuch – Sicherung der Datenbank
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/monatsbuch-backup
+EOF
+  cat > /etc/systemd/system/monatsbuch-backup.timer <<'EOF'
+[Unit]
+Description=SM Monatsbuch – tägliche Sicherung um 3:30 Uhr
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now monatsbuch-update.timer monatsbuch-backup.timer >>"$LOG" 2>&1
+else
+  cat > /etc/cron.d/monatsbuch <<'EOF'
+*/10 * * * * root /usr/local/sbin/monatsbuch-update >/dev/null 2>&1
+30 3 * * * root /usr/local/sbin/monatsbuch-backup >/dev/null 2>&1
+EOF
+fi
+# aktuellen Stand als installiert merken
+CUR=$(curl -fsS --max-time 20 -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/$REPO/commits/main" 2>/dev/null || true)
+[[ "$CUR" =~ ^[0-9a-f]{40}$ ]] && [ ! -f "$SRC_TGZ" ] && echo "$CUR" > /var/lib/monatsbuch/deployed
+ok "Automatische Updates aktiv (alle 10 Minuten)"
+if /usr/local/sbin/monatsbuch-backup >>"$LOG" 2>&1; then ok "Tägliche Sicherung aktiv (3:30 Uhr, 30 Tage) – erste Sicherung erstellt"; else warn "Sicherung eingerichtet, erster Lauf fehlgeschlagen (Details in $LOG)"; fi
+
+# ---------- 7. Prüfen ----------
 sleep 1
 RESP=$(curl -s --max-time 10 -H "Host: $DOMAIN" "http://127.0.0.1/api.php?action=state" || true)
 if echo "$RESP" | grep -q '"csrf"'; then ok "App antwortet"; else
@@ -225,5 +364,5 @@ if [ "$CODE" = 404 ] || [ "$CODE" = 403 ]; then ok "Datenordner von außen gespe
 say ""
 say "${B}${G}Fertig.${N} Öffne jetzt: ${B}https://$DOMAIN/${N}"
 [ $UPDATE -eq 0 ] && say "Beim ersten Aufruf legst du dein Admin-Konto an."
-say "Update später: denselben Befehl noch einmal ausführen."
-say "Sicherung: Ordner $APP_DIR/data regelmäßig kopieren."
+say "Updates kommen ab jetzt automatisch (alle 10 Minuten geprüft)."
+say "Sicherungen: /var/backups/monatsbuch – zusätzlich in der App: Menü → Sicherung herunterladen."

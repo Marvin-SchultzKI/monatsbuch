@@ -7,7 +7,7 @@ if (PHP_VERSION_ID < 80000) {
     exit('Monatsbuch braucht PHP 8.0 oder neuer. Bitte im netcup-Kundenbereich die PHP-Version umstellen.');
 }
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const FIELDS = ['c', 'cb', 'w', 'wb', 's', 'sb', 'k', 'kb'];
 
 function app_config(): array

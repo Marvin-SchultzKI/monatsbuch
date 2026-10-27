@@ -147,7 +147,7 @@ async function api(action, body, query = '') {
 async function boot() {
   try {
     const st = await api('state');
-    S.csrf = st.csrf;
+    S.csrf = st.csrf; S.version = st.version;
     if (st.needSetup) return renderAuth('setup');
     if (!st.user) return renderAuth('login');
     S.me = st.user;
@@ -267,7 +267,9 @@ function renderShell() {
       ${S.me.isAdmin ? '<button data-go="benutzer">Benutzer verwalten</button>' : ''}
       <button data-go="konto">Passwort ändern</button>
       <button data-go="export">Daten exportieren (CSV)</button>
+      ${S.me.isAdmin ? '<button id="backup-dl">Sicherung herunterladen</button>' : ''}
       <button id="logout">Abmelden</button>
+      <div class="who" style="border:0;border-top:1px solid var(--line-2);margin:4px 0 0">Version ${esc(S.version || '')}</div>
     </div>
     <main id="view"></main>`;
   paintSave();
@@ -275,6 +277,11 @@ function renderShell() {
   mb.onclick = ev => { ev.stopPropagation(); menu.hidden = !menu.hidden; mb.setAttribute('aria-expanded', String(!menu.hidden)); };
   document.addEventListener('click', ev => { if (!menu.hidden && !menu.contains(ev.target)) { menu.hidden = true; mb.setAttribute('aria-expanded', 'false'); } });
   menu.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { menu.hidden = true; location.hash = b.dataset.go; });
+  document.getElementById('backup-dl')?.addEventListener('click', async () => {
+    menu.hidden = true; await flushSaves();
+    window.location.href = 'api.php?action=backup';
+    toast('Sicherung wird heruntergeladen. Bewahre sie außerhalb des Servers auf, z. B. in der Cloud.');
+  });
   document.getElementById('logout').onclick = async () => { await flushSaves(); try { sessionStorage.clear(); } catch {} await api('logout', {}); boot(); };
   const op = document.getElementById('owner-pick');
   if (op) op.onchange = async () => { await flushSaves(); await loadData(op.value); renderShell(); route(); toast(`Tabelle von ${S.owner.name} geöffnet`); };
