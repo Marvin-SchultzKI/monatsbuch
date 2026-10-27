@@ -1,0 +1,18 @@
+# Monatsbuch – Schutz für Apache (netcup Webhosting)
+Options -Indexes
+DirectoryIndex index.php
+
+# Interne Dateien nicht direkt ausliefern
+<FilesMatch "^(lib|config)\.php$|\.(sqlite|md)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+<IfModule mod_headers.c>
+  Header always set X-Frame-Options "DENY"
+  Header always set X-Content-Type-Options "nosniff"
+</IfModule>
