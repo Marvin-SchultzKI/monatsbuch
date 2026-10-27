@@ -16,7 +16,7 @@ DOMAIN="${DOMAIN:-monatebuch.duckdns.org}"
 APP_DIR="${APP_DIR:-/var/www/monatsbuch}"
 SRC_TGZ="${SRC_TGZ:-https://codeload.github.com/Marvin-SchultzKI/monatsbuch/tar.gz/refs/heads/main}"
 LOG=/root/monatsbuch-install.log
-NAME=monatsbuch
+APPNAME=monatsbuch
 
 B=$'\e[1m'; R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; N=$'\e[0m'
 say()  { echo "$*" | tee -a "$LOG"; }
@@ -37,7 +37,7 @@ say ""
 
 # ---------- 1. Bestandsaufnahme (nur lesen) ----------
 command -v apt-get >/dev/null || die "Nur Ubuntu/Debian wird unterstützt."
-. /etc/os-release; say "System:      $PRETTY_NAME"
+OSNAME=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unbekannt}" ); say "System:      $OSNAME"
 [ -d /usr/local/psa ] && die "Plesk ist installiert. Dann bitte die App über Plesk einrichten, nicht mit diesem Skript."
 
 LISTEN=$(ss -tlnpH 2>/dev/null | awk '$4 ~ /:(80|443)$/ {print $6}' | sed -E 's/users:\(\("([^"]+)".*/\1/' | sort -u | tr '\n' ' ')
@@ -57,8 +57,8 @@ say "PHP:         ${PHPV:-nicht installiert}"
 say "Webserver:   $MODE"
 
 UPDATE=0
-if [ "$MODE" != apache ] && [ -f /etc/nginx/sites-available/$NAME.conf -o -f /etc/nginx/conf.d/$NAME.conf ]; then UPDATE=1; fi
-if [ "$MODE" = apache ] && [ -f /etc/apache2/sites-available/$NAME.conf ]; then UPDATE=1; fi
+if [ "$MODE" != apache ] && [ -f /etc/nginx/sites-available/$APPNAME.conf -o -f /etc/nginx/conf.d/$APPNAME.conf ]; then UPDATE=1; fi
+if [ "$MODE" = apache ] && [ -f /etc/apache2/sites-available/$APPNAME.conf ]; then UPDATE=1; fi
 
 if [ $UPDATE -eq 0 ]; then
   if [ "$MODE" = nginx ] && nginx -T 2>/dev/null | grep -E "^\s*server_name\b" | grep -qw "$DOMAIN"; then
@@ -133,7 +133,7 @@ ok "App liegt in $APP_DIR (Version $(grep -oE "APP_VERSION = '[^']+'" "$APP_DIR/
 # ---------- 5. Webserver ----------
 if [ $UPDATE -eq 0 ]; then
   if [ "$MODE" = apache ]; then
-    CONF=/etc/apache2/sites-available/$NAME.conf
+    CONF=/etc/apache2/sites-available/$APPNAME.conf
     cat > "$CONF" <<EOF
 # SM Monatsbuch – angelegt von install.sh
 <VirtualHost *:80>
@@ -150,14 +150,14 @@ if [ $UPDATE -eq 0 ]; then
 </VirtualHost>
 EOF
     a2enmod -q proxy_fcgi setenvif rewrite headers >>"$LOG" 2>&1
-    a2ensite -q $NAME >>"$LOG" 2>&1
+    a2ensite -q $APPNAME >>"$LOG" 2>&1
     if ! apache2ctl configtest >>"$LOG" 2>&1; then
-      a2dissite -q $NAME >>"$LOG" 2>&1 || true; rm -f "$CONF"
+      a2dissite -q $APPNAME >>"$LOG" 2>&1 || true; rm -f "$CONF"
       die "Apache-Konfiguration fehlerhaft – meine Datei wurde wieder entfernt, alles wie vorher."
     fi
     svc reload apache2
   else
-    if [ -d /etc/nginx/sites-available ]; then CONF=/etc/nginx/sites-available/$NAME.conf; LINK=/etc/nginx/sites-enabled/$NAME.conf; else CONF=/etc/nginx/conf.d/$NAME.conf; LINK=""; fi
+    if [ -d /etc/nginx/sites-available ]; then CONF=/etc/nginx/sites-available/$APPNAME.conf; LINK=/etc/nginx/sites-enabled/$APPNAME.conf; else CONF=/etc/nginx/conf.d/$APPNAME.conf; LINK=""; fi
     V6=""; [ -s /proc/net/if_inet6 ] && V6="listen [::]:80;"
     cat > "$CONF" <<EOF
 # SM Monatsbuch – angelegt von install.sh
