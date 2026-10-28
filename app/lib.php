@@ -7,7 +7,7 @@ if (PHP_VERSION_ID < 80000) {
     exit('Monatsbuch braucht PHP 8.0 oder neuer. Bitte im netcup-Kundenbereich die PHP-Version umstellen.');
 }
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const FIELDS = ['c', 'cb', 'w', 'wb', 's', 'sb', 'k', 'kb'];
 
 function app_config(): array
@@ -106,6 +106,36 @@ function migrate(PDO $pdo): void
         key TEXT NOT NULL,
         ts INTEGER NOT NULL
     )');
+    // Ab 1.2.0: einzelne Einträge (Buchungen) mit Spitzname statt einer Zeile pro Tag
+    $pdo->exec('CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day TEXT NOT NULL,
+        nick TEXT NOT NULL DEFAULT \'\',
+        c REAL NOT NULL DEFAULT 0, cb REAL NOT NULL DEFAULT 0,
+        w REAL NOT NULL DEFAULT 0, wb REAL NOT NULL DEFAULT 0,
+        s REAL NOT NULL DEFAULT 0, sb REAL NOT NULL DEFAULT 0,
+        k REAL NOT NULL DEFAULT 0, kb REAL NOT NULL DEFAULT 0,
+        manuell REAL NOT NULL DEFAULT 0,
+        info TEXT NOT NULL DEFAULT \'\',
+        status TEXT NOT NULL DEFAULT \'bezahlt\',
+        teil REAL NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS bookings_user_day ON bookings (user_id, day)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    $done = $pdo->query("SELECT value FROM meta WHERE key = 'migrated_entries_v12'")->fetchColumn();
+    if ($done === false) {
+        // bisherige Tageszeilen einmalig als Einträge „ohne Name“ übernehmen; alte Tabelle bleibt als Sicherung
+        $pdo->beginTransaction();
+        $pdo->exec("INSERT INTO bookings (user_id, day, nick, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil, created_at, updated_at)
+            SELECT user_id, day, '', c, cb, w, wb, s, sb, k, kb, manuell, info,
+                   CASE WHEN status = 'offen' THEN 'offen' ELSE 'bezahlt' END, teil, updated_at, updated_at
+            FROM entries");
+        $pdo->exec("INSERT INTO meta (key, value) VALUES ('migrated_entries_v12', '" . gmdate('c') . "')");
+        $pdo->commit();
+    }
 }
 
 function start_session(): void

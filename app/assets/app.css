@@ -243,3 +243,29 @@ table.grid .bon{color:var(--ink-3);font-weight:500}
 @media (prefers-reduced-motion:no-preference){
   .btn,.tab,.icon-btn{transition:background .12s,color .12s}
 }
+
+/* ---------- 1.2: Einträge pro Kunde ---------- */
+.qty-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:6px}
+.qty{display:flex;flex-direction:column;gap:4px;min-width:0}
+.qlbl{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden}
+.qlbl i{width:8px;height:8px;border-radius:2px;flex:none}
+.qlbl em{font-style:normal;color:var(--ink-3);font-size:11px;margin-left:auto}
+.qty input{text-align:center;font-size:18px;font-weight:600;padding:8px 4px}
+@media (max-width:420px){.qlbl em{display:none}}
+.bk-sum{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13.5px;color:var(--ink-2);background:var(--surface-2);border-radius:10px;padding:10px 12px}
+.bk-sum b{color:var(--ink)}
+.bk-sum .open b,.small.open,span.open{color:var(--bad)}
+details summary{cursor:pointer;color:var(--ink-2);font-size:13.5px}
+.bk-item{appearance:none;width:100%;display:flex;gap:12px;align-items:center;text-align:left;background:none;border:0;border-bottom:1px solid var(--line-2);padding:12px 4px;cursor:pointer;color:inherit;font:inherit;border-radius:8px}
+.bk-item:last-child{border-bottom:0}
+.bk-item:hover{background:var(--surface-2)}
+.bk-item.sel{background:var(--accent-soft)}
+.bk-item .main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.bk-item .t{font-weight:600}
+.bk-item .amt{font-family:var(--mono);font-weight:600;display:flex;flex-direction:column;align-items:flex-end;white-space:nowrap}
+.bk-item .amt .small{font-weight:500}
+table.grid tr.click{cursor:pointer}
+table.grid tr.click:hover td{background:var(--surface-2)}
+table.grid tr.empty td{color:var(--ink-3)}
+.cust .item{padding:10px 0}
+.cust > .row .amt{font-family:var(--mono);font-weight:600;color:var(--bad)}

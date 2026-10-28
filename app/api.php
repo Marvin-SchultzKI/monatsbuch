@@ -78,13 +78,13 @@ function route(string $method, string $action, array $in): void
         $uid = target_user($me, $_GET['u'] ?? null);
         $owner = $pdo->prepare('SELECT id, username, display_name, is_admin FROM users WHERE id = ?');
         $owner->execute([$uid]);
-        $e = $pdo->prepare('SELECT day, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM entries WHERE user_id = ? ORDER BY day');
+        $e = $pdo->prepare('SELECT id, day, nick, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE user_id = ? ORDER BY day, id');
         $e->execute([$uid]);
         $p = $pdo->prepare('SELECT id, valid_from, c, w, s, k, cb, wb, sb, kb FROM prices WHERE user_id = ? ORDER BY valid_from');
         $p->execute([$uid]);
         $out = [
             'owner' => user_public($owner->fetch()),
-            'entries' => array_map('cast_entry', $e->fetchAll()),
+            'bookings' => array_map('cast_booking', $e->fetchAll()),
             'prices' => array_map('cast_price', $p->fetchAll()),
         ];
         if ($isAdmin) $out['users'] = list_users();
@@ -92,31 +92,47 @@ function route(string $method, string $action, array $in): void
     }
 
     if ($method === 'POST' && $action === 'saveEntry') {
+        fail('Es gibt eine neue Version der App. Bitte Seite neu laden.', 409);
+    }
+
+    if ($method === 'POST' && $action === 'saveBooking') {
         $uid = target_user($me, $in['u'] ?? null);
-        $day = valid_day($in['day'] ?? '');
-        $row = ['user_id' => $uid, 'day' => $day];
-        $empty = true;
+        $row = ['day' => valid_day($in['day'] ?? '')];
+        $row['nick'] = mb_substr(trim(preg_replace('/\s+/u', ' ', (string)($in['nick'] ?? ''))), 0, 40);
+        $any = false;
         foreach (FIELDS as $f) {
             $row[$f] = num($in[$f] ?? 0, 0, 100000);
-            if ($row[$f] != 0) $empty = false;
+            if ($row[$f] != 0) $any = true;
         }
         $row['manuell'] = num($in['manuell'] ?? 0, -10000000, 10000000);
         $row['info'] = mb_substr(trim((string)($in['info'] ?? '')), 0, 500);
-        $status = (string)($in['status'] ?? '');
-        $row['status'] = in_array($status, ['', 'offen', 'bezahlt'], true) ? $status : '';
+        $status = (string)($in['status'] ?? 'bezahlt');
+        $row['status'] = $status === 'offen' ? 'offen' : 'bezahlt';
         $teil = $in['teil'] ?? null;
         $row['teil'] = ($teil === null || $teil === '') ? null : num($teil, 0, 10000000);
-        if ($row['manuell'] != 0 || $row['info'] !== '' || $row['status'] !== '' || $row['teil'] !== null) $empty = false;
-        if ($empty) {
-            $pdo->prepare('DELETE FROM entries WHERE user_id = ? AND day = ?')->execute([$uid, $day]);
+        if (!$any && $row['manuell'] == 0 && $row['info'] === '') fail('Bitte mindestens eine Stückzahl, einen Betrag oder eine Info eintragen.');
+        $row['updated_at'] = now_iso();
+        $id = (int)($in['id'] ?? 0);
+        if ($id) {
+            $sets = implode(',', array_map(fn($c) => "$c = :$c", array_keys($row)));
+            $st = $pdo->prepare("UPDATE bookings SET $sets WHERE id = :id AND user_id = :uid");
+            $st->execute($row + ['id' => $id, 'uid' => $uid]);
+            if ($st->rowCount() === 0) fail('Eintrag nicht gefunden (vielleicht gelöscht).', 404);
         } else {
-            $row['updated_at'] = now_iso();
+            $row['user_id'] = $uid;
+            $row['created_at'] = $row['updated_at'];
             $cols = array_keys($row);
-            $sql = 'INSERT INTO entries (' . implode(',', $cols) . ') VALUES (:' . implode(',:', $cols) . ')
-                    ON CONFLICT(user_id, day) DO UPDATE SET '
-                . implode(',', array_map(fn($c) => "$c = excluded.$c", array_diff($cols, ['user_id', 'day'])));
-            $pdo->prepare($sql)->execute($row);
+            $pdo->prepare('INSERT INTO bookings (' . implode(',', $cols) . ') VALUES (:' . implode(',:', $cols) . ')')->execute($row);
+            $id = (int)$pdo->lastInsertId();
         }
+        $st = $pdo->prepare('SELECT id, day, nick, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE id = ?');
+        $st->execute([$id]);
+        json_out(['ok' => true, 'booking' => cast_booking($st->fetch())]);
+    }
+
+    if ($method === 'POST' && $action === 'deleteBooking') {
+        $uid = target_user($me, $in['u'] ?? null);
+        $pdo->prepare('DELETE FROM bookings WHERE id = ? AND user_id = ?')->execute([(int)($in['id'] ?? 0), $uid]);
         json_out(['ok' => true]);
     }
 
@@ -239,8 +255,8 @@ function target_user(array $me, $requested): int
 function list_users(): array
 {
     $rows = db()->query('SELECT u.id, u.username, u.display_name, u.is_admin,
-        (SELECT COUNT(*) FROM entries e WHERE e.user_id = u.id) AS days,
-        (SELECT MAX(day) FROM entries e WHERE e.user_id = u.id) AS last_day
+        (SELECT COUNT(DISTINCT day) FROM bookings e WHERE e.user_id = u.id) AS days,
+        (SELECT MAX(day) FROM bookings e WHERE e.user_id = u.id) AS last_day
         FROM users u ORDER BY u.display_name COLLATE NOCASE')->fetchAll();
     return array_map(fn($u) => user_public($u) + ['days' => (int)$u['days'], 'lastDay' => $u['last_day']], $rows);
 }
@@ -301,6 +317,14 @@ function num($v, float $min, float $max): float
     $f = (float)$v;
     if ($f < $min || $f > $max) fail('Zahl außerhalb des erlaubten Bereichs.');
     return round($f, 2);
+}
+
+function cast_booking(array $r): array
+{
+    $r['id'] = (int)$r['id'];
+    foreach (array_merge(FIELDS, ['manuell']) as $f) $r[$f] = (float)$r[$f];
+    $r['teil'] = $r['teil'] === null ? null : (float)$r['teil'];
+    return $r;
 }
 
 function cast_entry(array $r): array

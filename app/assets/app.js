@@ -24,9 +24,9 @@ const CAT_COLORS = { light: ['#eda100', '#e87ba4', '#008300', '#6250d6'], dark: 
 const ZERO_P = { c: 0, w: 0, s: 0, k: 0, cb: 0, wb: 0, sb: 0, kb: 0, valid_from: null };
 
 const S = {
-  csrf: '', me: null, owner: null, users: [], entries: new Map(), prices: [], eff: [],
-  view: 'tag', day: todayStr(), statsMode: 'monat',
-  timers: new Map(), pending: new Set(), saving: 0, saveError: null, charts: [],
+  csrf: '', me: null, owner: null, users: [], bookings: [], byDay: new Map(), prices: [], eff: [],
+  view: 'tag', day: todayStr(), statsMode: 'monat', edit: null, formDirty: false,
+  saving: 0, saveError: null, charts: [],
 };
 const app = document.getElementById('app');
 const APP_NAME = app.dataset.appName || 'SM Monatsbuch';
@@ -85,8 +85,24 @@ function isDark() {
 function mode() { return isDark() ? 'dark' : 'light'; }
 function monthColor(key) { return MONTH_COLORS[mode()][monthIdx(key)]; }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
-function blankEntry(day) { return { day, c: 0, cb: 0, w: 0, wb: 0, s: 0, sb: 0, k: 0, kb: 0, manuell: 0, info: '', status: '', teil: null }; }
-function getEntry(day) { return S.entries.get(day) || blankEntry(day); }
+function blankBooking(day) { return { id: 0, day, nick: '', c: 0, cb: 0, w: 0, wb: 0, s: 0, sb: 0, k: 0, kb: 0, manuell: 0, info: '', status: 'bezahlt', teil: null }; }
+function indexBookings() {
+  S.byDay = new Map();
+  for (const b of S.bookings) { if (!S.byDay.has(b.day)) S.byDay.set(b.day, []); S.byDay.get(b.day).push(b); }
+}
+function dayBookings(day) { return S.byDay.get(day) || []; }
+function allDays() { return [...S.byDay.keys()].sort(); }
+function nickLabel(n) { return n ? n : 'ohne Name'; }
+function itemsText(b) {
+  const parts = FIELDS.filter(f => b[f]).map(f => `${num(b[f])}× ${LABEL[f]}`);
+  if (b.manuell) parts.push(`${b.manuell > 0 ? '+' : ''}${eur(b.manuell)} manuell`);
+  return parts.join(' · ') || '–';
+}
+function knownNicks() { // nach Häufigkeit sortiert
+  const m = new Map();
+  for (const b of S.bookings) if (b.nick) m.set(b.nick, (m.get(b.nick) || 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+}
 
 /* ---------- Preise & Rechnung ---------- */
 function buildEff() {
@@ -112,19 +128,35 @@ function calc(e) {
   const offen = e.status === 'offen' ? (e.teil === null || e.teil === undefined ? umsatz : e.teil) : 0;
   return { umsatz, einkauf, profit, offen, p };
 }
-function hasData(e) { return FIELDS.some(f => e[f]) || e.manuell || e.info || e.status || e.teil !== null; }
+function dayTotals(day) {
+  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, n: 0, units: {} };
+  FIELDS.forEach(f => t.units[f] = 0);
+  for (const b of dayBookings(day)) {
+    const r = calc(b);
+    t.umsatz += r.umsatz; t.einkauf += r.einkauf; t.profit += r.profit; t.offen += r.offen; t.n++;
+    FIELDS.forEach(f => t.units[f] += b[f]);
+  }
+  return t;
+}
 function sumDays(days) {
-  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, manuell: 0, active: 0, best: null, units: {}, catUmsatz: {}, catEinkauf: {} };
+  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, manuell: 0, active: 0, n: 0, best: null, units: {}, catUmsatz: {}, catEinkauf: {}, customers: new Map() };
   FIELDS.forEach(f => t.units[f] = 0);
   CATS.forEach(c => { t.catUmsatz[c.key] = 0; t.catEinkauf[c.key] = 0; });
   for (const d of days) {
-    const e = S.entries.get(d); if (!e) continue;
-    const r = calc(e);
-    t.umsatz += r.umsatz; t.einkauf += r.einkauf; t.profit += r.profit; t.offen += r.offen; t.manuell += e.manuell || 0;
-    FIELDS.forEach(f => t.units[f] += e[f]);
-    CATS.forEach(c => { t.catUmsatz[c.key] += e[c.key] * r.p[c.key]; t.catEinkauf[c.key] += (e[c.key] + e[c.bon]) * r.p[c.bon]; });
-    if (FIELDS.some(f => e[f])) t.active++;
-    if (r.umsatz > 0 && (!t.best || r.umsatz > t.best.umsatz)) t.best = { day: d, umsatz: r.umsatz };
+    const list = dayBookings(d); if (!list.length) continue;
+    let dayU = 0;
+    for (const b of list) {
+      const r = calc(b);
+      t.umsatz += r.umsatz; t.einkauf += r.einkauf; t.profit += r.profit; t.offen += r.offen; t.manuell += b.manuell || 0; t.n++;
+      dayU += r.umsatz;
+      FIELDS.forEach(f => t.units[f] += b[f]);
+      CATS.forEach(c => { t.catUmsatz[c.key] += b[c.key] * r.p[c.key]; t.catEinkauf[c.key] += (b[c.key] + b[c.bon]) * r.p[c.bon]; });
+      const cu = t.customers.get(b.nick) || { nick: b.nick, umsatz: 0, profit: 0, offen: 0, n: 0, last: '' };
+      cu.umsatz += r.umsatz; cu.profit += r.profit; cu.offen += r.offen; cu.n++; if (b.day > cu.last) cu.last = b.day;
+      t.customers.set(b.nick, cu);
+    }
+    t.active++;
+    if (dayU > 0 && (!t.best || dayU > t.best.umsatz)) t.best = { day: d, umsatz: dayU };
   }
   return t;
 }
@@ -167,46 +199,42 @@ async function loadData(uid) {
   try { d = await api('data', null, `&u=${encodeURIComponent(uid)}`); }
   catch (e) { if (String(uid) !== String(S.me.id)) d = await api('data', null, `&u=${S.me.id}`); else throw e; }
   S.owner = d.owner; S.users = d.users || []; S.prices = d.prices;
-  S.entries = new Map(d.entries.map(e => [e.day, e]));
+  S.bookings = d.bookings || []; indexBookings();
   buildEff();
   try { sessionStorage.setItem('mb-owner', String(S.owner.id)); } catch {}
 }
 
-/* ---------- Speichern (pro Tag, verzögert) ---------- */
-function setField(day, field, value) {
-  const e = { ...getEntry(day), [field]: value };
-  if (hasData(e)) S.entries.set(day, e); else S.entries.delete(day);
-  queueSave(day);
+/* ---------- Speichern ---------- */
+function upsertLocal(b) {
+  const i = S.bookings.findIndex(x => x.id === b.id);
+  if (i >= 0) S.bookings[i] = b; else S.bookings.push(b);
+  S.bookings.sort((a, c) => a.day === c.day ? a.id - c.id : (a.day < c.day ? -1 : 1));
+  indexBookings();
 }
-function queueSave(day) {
-  S.pending.add(day);
-  clearTimeout(S.timers.get(day));
-  S.timers.set(day, setTimeout(() => saveDay(day), 700));
-  paintSave();
-}
-async function saveDay(day) {
-  S.timers.delete(day);
-  const e = getEntry(day);
+async function saveBooking(b) {
   S.saving++; paintSave();
   try {
-    await api('saveEntry', { u: S.owner.id, ...e });
-    S.pending.delete(day); S.saveError = null;
-  } catch (err) {
-    S.saveError = err.message;
-  } finally { S.saving--; paintSave(); }
+    const r = await api('saveBooking', { u: S.owner.id, ...b });
+    upsertLocal(r.booking); S.saveError = null;
+    return r.booking;
+  } catch (e) { S.saveError = e.message; throw e; }
+  finally { S.saving--; paintSave(); }
 }
-async function flushSaves() {
-  for (const [day, t] of S.timers) { clearTimeout(t); S.timers.delete(day); }
-  await Promise.all([...S.pending].map(saveDay));
+async function deleteBooking(id) {
+  S.saving++; paintSave();
+  try { await api('deleteBooking', { u: S.owner.id, id }); S.bookings = S.bookings.filter(x => x.id !== id); indexBookings(); S.saveError = null; }
+  catch (e) { S.saveError = e.message; throw e; }
+  finally { S.saving--; paintSave(); }
 }
+async function flushSaves() { /* Einträge werden sofort gespeichert */ }
 function paintSave() {
   const el = document.getElementById('save-state'); if (!el) return;
-  el.className = 'save-state';
-  if (S.saveError) { el.classList.add('err'); el.innerHTML = `<span class="dot"></span><button class="btn sm danger" id="save-retry">Nicht gespeichert – erneut</button>`; document.getElementById('save-retry').onclick = flushSaves; el.title = S.saveError; return; }
-  if (S.saving || S.pending.size) { el.classList.add('busy'); el.innerHTML = '<span class="dot"></span>Speichert …'; return; }
+  el.className = 'save-state'; el.title = '';
+  if (S.saving) { el.classList.add('busy'); el.innerHTML = '<span class="dot"></span>Speichert …'; return; }
+  if (S.saveError) { el.classList.add('err'); el.innerHTML = '<span class="dot"></span>Nicht gespeichert'; el.title = S.saveError; return; }
   el.innerHTML = '<span class="dot"></span>Gespeichert';
 }
-window.addEventListener('beforeunload', ev => { if (S.pending.size) { flushSaves(); ev.preventDefault(); ev.returnValue = ''; } });
+window.addEventListener('beforeunload', ev => { if (S.formDirty || S.saving) { ev.preventDefault(); ev.returnValue = ''; } });
 
 function toast(msg) {
   document.querySelectorAll('.toast').forEach(t => t.remove());
@@ -315,10 +343,18 @@ function render() {
   window.scrollTo({ top: 0 });
 }
 
-/* ---------- Ansicht: Tag ---------- */
+/* ---------- Ansicht: Tag (Einträge pro Kunde) ---------- */
 function viewTag(el) {
-  const day = S.day, e = getEntry(day), r = calc(e);
-  const isToday = day === todayStr();
+  const day = S.day, isToday = day === todayStr();
+  const list = dayBookings(day).slice().reverse();
+  const p = priceFor(day), colors = CAT_COLORS[mode()];
+  const editing = S.edit && S.edit.day === day ? S.edit : null;
+  if (!editing) S.edit = null;
+  const qty = f => {
+    const c = CATS.find(x => x.key === f || x.bon === f), i = CATS.indexOf(c), bon = f === c.bon;
+    return `<label class="qty"><span class="qlbl"><i style="background:${colors[i]}"></i>${LABEL[f]}<em>${eur(bon ? p[f] : p[f])}</em></span>
+      <input class="input mono" data-f="${f}" inputmode="decimal" placeholder="0" autocomplete="off" aria-label="${LABEL[f]} Stückzahl"></label>`;
+  };
   el.innerHTML = `
     <div class="card">
       <div class="period">
@@ -331,124 +367,136 @@ function viewTag(el) {
         ${isToday ? '' : '<button class="btn sm" id="go-today">Heute</button>'}
       </div>
     </div>
-    <div class="day-grid">${CATS.map((c, i) => `
-      <div class="cat">
-        <div class="cat-head"><span class="sw" style="background:${CAT_COLORS[mode()][i]}"></span>${c.label}
-          <span class="price">${eur(r.p[c.key])} · Bon ${eur(r.p[c.bon])}</span></div>
-        ${stepper(c.key, e[c.key])}${stepper(c.bon, e[c.bon])}
-      </div>`).join('')}
+    <div class="card" id="bk-card">
+      <div class="row" style="margin-bottom:12px"><h2 class="grow" style="margin:0" id="bk-title">${editing ? 'Eintrag bearbeiten' : 'Neuer Eintrag'}</h2>
+        <button class="btn sm" type="button" id="bk-cancel" ${editing ? '' : 'hidden'}>Abbrechen</button></div>
+      <form id="bk-form" autocomplete="off" style="display:flex;flex-direction:column;gap:12px">
+        <label class="field">Spitzname
+          <input class="input" id="bk-nick" list="bk-nicks" maxlength="40" placeholder="z. B. Kalle" autocapitalize="words"></label>
+        <datalist id="bk-nicks">${knownNicks().map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+        <div class="field">Was wurde gekauft? <span class="small muted">Anzahl eintippen, leer = 0</span>
+          <div class="qty-grid">${['c', 'w', 's', 'k'].map(qty).join('')}${['cb', 'wb', 'sb', 'kb'].map(qty).join('')}</div></div>
+        <div class="field">Bezahlt?
+          <div class="seg" role="group" aria-label="Bezahlt" id="bk-status"><button type="button" data-v="bezahlt">bezahlt</button><button type="button" data-v="offen">noch offen</button></div></div>
+        <label class="field" id="bk-teil-wrap" hidden>Davon noch offen (€) <span class="small muted">leer = ganzer Betrag offen</span>
+          <input class="input mono" id="bk-teil" inputmode="decimal"></label>
+        <label class="field">Info <span class="small muted">optional</span>
+          <input class="input" id="bk-info" maxlength="500" placeholder="z. B. zahlt Freitag"></label>
+        <details id="bk-more"><summary>Manueller Betrag ± (wirkt nur auf den Profit)</summary>
+          <label class="field" style="margin-top:8px">Manuell ± (€)<input class="input mono" id="bk-manuell" inputmode="decimal" placeholder="z. B. -20 oder 15"></label></details>
+        <div class="bk-sum" id="bk-sum"></div>
+        <p class="err" id="bk-err" hidden></p>
+        <div class="row"><button class="btn primary grow" type="submit" id="bk-save">Speichern</button>
+          <button class="btn danger" type="button" id="bk-del" ${editing ? '' : 'hidden'}>Löschen</button></div>
+      </form>
     </div>
-    <div class="card">
-      <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
-        <label class="field">Manuell ± (€) <span class="small muted">wirkt nur auf den Profit</span>
-          <input class="input mono" id="f-manuell" inputmode="decimal" value="${e.manuell ? numFmt.format(e.manuell) : ''}" placeholder="z. B. -20 oder 15"></label>
-        <div class="field">Status
-          <div class="seg" role="group" aria-label="Status">${[['', '—'], ['offen', 'offen'], ['bezahlt', 'bezahlt']].map(([v, l]) => `<button type="button" data-v="${v}" aria-pressed="${e.status === v}">${l}</button>`).join('')}</div></div>
-        <label class="field" id="teil-wrap" ${e.status === 'offen' ? '' : 'hidden'}>Teilbetrag offen (€) <span class="small muted">leer = ganzer Umsatz offen</span>
-          <input class="input mono" id="f-teil" inputmode="decimal" value="${e.teil !== null && e.teil !== undefined ? numFmt.format(e.teil) : ''}" placeholder="${numFmt.format(r.umsatz)}"></label>
-      </div>
-      <label class="field" style="margin-top:12px">Info<textarea class="input" id="f-info" maxlength="500" placeholder="z. B. Kunde, Notiz, Zahlung erhalten am …">${esc(e.info)}</textarea></label>
+    <div class="kpis" id="day-kpis"></div>
+    <div class="card"><h3>Einträge am ${dayShort(day)}${list.length ? ` <span class="muted">(${list.length})</span>` : ''}</h3>
+      ${list.length ? `<div class="list">${list.map(b => { const r = calc(b); return `
+        <button type="button" class="bk-item ${editing && editing.id === b.id ? 'sel' : ''}" data-id="${b.id}">
+          <span class="main"><span class="t">${esc(nickLabel(b.nick))}${b.status === 'offen' ? ' <span class="pill offen">offen</span>' : ''}</span>
+            <span class="small muted">${itemsText(b)}${b.info ? ' · ' + esc(b.info) : ''}</span></span>
+          <span class="amt">${eur(r.umsatz)}${r.offen ? `<span class="small open">offen ${eur(r.offen)}</span>` : ''}</span>
+        </button>`; }).join('')}</div>` : '<p class="muted" style="margin:0">Noch keine Einträge an diesem Tag.</p>'}
     </div>
-    <div class="result" id="day-result"></div>
-    <p class="small muted" id="price-note"></p>`;
-  paintDayResult();
-  el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addDays(S.day, +b.dataset.nav)); render(); });
-  el.querySelector('#day-pick').onchange = ev => { if (ev.target.value) { setDay(ev.target.value); render(); } };
-  el.querySelector('#go-today')?.addEventListener('click', () => { setDay(todayStr()); render(); });
-  el.querySelectorAll('.stepper').forEach(st => {
-    const f = st.dataset.f, inp = st.querySelector('input');
-    const apply = v => { v = Math.max(0, Math.round(v * 100) / 100); inp.value = v ? numFmt.format(v) : ''; setField(day, f, v); paintDayResult(); };
-    st.querySelector('[data-d="-1"]').onclick = () => apply(parseNum(inp.value) - 1);
-    st.querySelector('[data-d="1"]').onclick = () => apply(parseNum(inp.value) + 1);
-    inp.oninput = () => { const v = parseNum(inp.value); if (!isNaN(v) && v >= 0) { setField(day, f, v); paintDayResult(); } };
-    inp.onblur = () => { const v = parseNum(inp.value); inp.value = v > 0 ? numFmt.format(v) : ''; };
-  });
-  const man = el.querySelector('#f-manuell');
-  man.oninput = () => { const v = parseNum(man.value); man.classList.toggle('bad', isNaN(v)); if (!isNaN(v)) { setField(day, 'manuell', v); paintDayResult(); } };
-  el.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
-    el.querySelectorAll('.seg button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
-    setField(day, 'status', b.dataset.v);
-    el.querySelector('#teil-wrap').hidden = b.dataset.v !== 'offen';
-    paintDayResult();
-  });
-  const teil = el.querySelector('#f-teil');
-  teil.oninput = () => {
-    const raw = teil.value.trim(); const v = parseNum(raw);
-    teil.classList.toggle('bad', raw !== '' && (isNaN(v) || v < 0));
-    if (raw === '') setField(day, 'teil', null); else if (!isNaN(v) && v >= 0) setField(day, 'teil', v);
-    paintDayResult();
+    <p class="small muted">${p.valid_from ? `Gerechnet mit den Preisen gültig ab ${dayDE(p.valid_from)}.` : 'Noch keine Preise hinterlegt.'}</p>`;
+
+  const t = dayTotals(day);
+  document.getElementById('day-kpis').innerHTML = kpi('Umsatz', t.umsatz) + kpi('Einkauf', t.einkauf) + kpi('Profit', t.profit, t.profit < 0 ? 'neg' : 'profit') + kpi('Noch offen', t.offen, t.offen > 0 ? 'open' : 'open zero');
+
+  el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { if (!confirmLeave()) return; setDay(addDays(S.day, +b.dataset.nav)); render(); });
+  el.querySelector('#day-pick').onchange = ev => { if (ev.target.value && confirmLeave()) { setDay(ev.target.value); render(); } };
+  el.querySelector('#go-today')?.addEventListener('click', () => { if (!confirmLeave()) return; setDay(todayStr()); render(); });
+
+  const form = el.querySelector('#bk-form');
+  const $ = s => form.querySelector(s);
+  let status = 'bezahlt';
+  const setStatus = v => { status = v; form.querySelectorAll('#bk-status button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === v))); $('#bk-teil-wrap').hidden = v !== 'offen'; };
+  const fill = b => {
+    $('#bk-nick').value = b.nick || '';
+    FIELDS.forEach(f => { $(`[data-f="${f}"]`).value = b[f] ? numFmt.format(b[f]) : ''; });
+    $('#bk-info').value = b.info || '';
+    $('#bk-manuell').value = b.manuell ? numFmt.format(b.manuell) : '';
+    $('#bk-more').open = !!b.manuell;
+    $('#bk-teil').value = b.teil !== null && b.teil !== undefined ? numFmt.format(b.teil) : '';
+    setStatus(b.status || 'bezahlt');
   };
-  let infoT; const info = el.querySelector('#f-info');
-  info.oninput = () => { clearTimeout(infoT); infoT = setTimeout(() => setField(day, 'info', info.value), 300); };
+  const read = () => {
+    const b = { ...(S.edit || blankBooking(day)), day };
+    let bad = null;
+    b.nick = $('#bk-nick').value.trim();
+    FIELDS.forEach(f => { const inp = $(`[data-f="${f}"]`), v = parseNum(inp.value); const isBad = isNaN(v) || v < 0; inp.classList.toggle('bad', isBad); if (isBad) bad = `${LABEL[f]}: bitte eine Zahl ab 0`; else b[f] = v; });
+    const m = parseNum($('#bk-manuell').value); $('#bk-manuell').classList.toggle('bad', isNaN(m)); if (isNaN(m)) bad = 'Manuell: bitte eine Zahl'; else b.manuell = m;
+    const tr = $('#bk-teil').value.trim(), tv = parseNum(tr);
+    if (status === 'offen' && tr !== '') { if (isNaN(tv) || tv < 0) bad = 'Teilbetrag: bitte eine Zahl ab 0'; else b.teil = tv; } else b.teil = null;
+    b.status = status; b.info = $('#bk-info').value.trim();
+    return { b, bad };
+  };
+  const paintSum = () => {
+    const { b } = read(), r = calc(b);
+    $('#bk-sum').innerHTML = `<span>Umsatz <b class="num">${eur(r.umsatz)}</b></span><span>Einkauf <b class="num">${eur(r.einkauf)}</b></span><span>Profit <b class="num">${eur(r.profit)}</b></span>${status === 'offen' ? `<span class="open">offen <b class="num">${eur(r.offen)}</b></span>` : ''}`;
+    $('#bk-teil').placeholder = numFmt.format(r.umsatz);
+  };
+  fill(editing || blankBooking(day));
+  paintSum();
+  S.formDirty = false;
+  form.addEventListener('input', () => { S.formDirty = true; paintSum(); });
+  form.querySelectorAll('#bk-status button').forEach(x => x.onclick = () => { setStatus(x.dataset.v); S.formDirty = true; paintSum(); });
+  form.querySelectorAll('.qty input').forEach(inp => inp.addEventListener('focus', () => inp.select()));
+  form.onsubmit = async ev => {
+    ev.preventDefault();
+    const err = $('#bk-err'); err.hidden = true;
+    const { b, bad } = read();
+    if (bad) { err.textContent = bad; err.hidden = false; return; }
+    if (!FIELDS.some(f => b[f]) && !b.manuell && !b.info) { err.textContent = 'Bitte mindestens eine Stückzahl eintragen.'; err.hidden = false; return; }
+    $('#bk-save').disabled = true;
+    try {
+      await saveBooking(b);
+      toast(`${S.edit ? 'Geändert' : 'Gespeichert'}: ${nickLabel(b.nick)} · ${eur(calc(b).umsatz)}`);
+      S.edit = null; S.formDirty = false; render();
+      document.getElementById('bk-nick')?.focus();
+    } catch (e) { err.textContent = e.message; err.hidden = false; $('#bk-save').disabled = false; }
+  };
+  el.querySelector('#bk-cancel').onclick = () => { S.edit = null; S.formDirty = false; render(); };
+  const del = el.querySelector('#bk-del');
+  del.onclick = async () => {
+    if (del.dataset.armed !== '1') { del.dataset.armed = '1'; del.textContent = 'Wirklich löschen?'; setTimeout(() => { if (del.isConnected) { del.dataset.armed = ''; del.textContent = 'Löschen'; } }, 4000); return; }
+    try { const n = nickLabel(S.edit.nick); await deleteBooking(S.edit.id); S.edit = null; S.formDirty = false; render(); toast(`Eintrag von ${n} gelöscht`); }
+    catch (e) { toast(e.message); }
+  };
+  el.querySelectorAll('.bk-item').forEach(it => it.onclick = () => {
+    if (!confirmLeave()) return;
+    S.edit = S.bookings.find(x => x.id === Number(it.dataset.id)) || null; S.formDirty = false; render();
+  });
 }
-function stepper(f, v) {
-  return `<div class="stepper" data-f="${f}"><span class="lbl">${LABEL[f]}</span><div class="ctl">
-    <button type="button" data-d="-1" aria-label="${LABEL[f]} minus 1">−</button>
-    <input inputmode="decimal" value="${v ? numFmt.format(v) : ''}" placeholder="0" aria-label="${LABEL[f]} Stückzahl">
-    <button type="button" data-d="1" aria-label="${LABEL[f]} plus 1">+</button></div></div>`;
-}
-function paintDayResult() {
-  const e = getEntry(S.day), r = calc(e);
-  const box = document.getElementById('day-result'); if (!box) return;
-  const teilInp = document.getElementById('f-teil'); if (teilInp) teilInp.placeholder = numFmt.format(r.umsatz);
-  box.innerHTML = kpi('Umsatz', r.umsatz) + kpi('Einkauf', r.einkauf) + kpi('Profit', r.profit, r.profit < 0 ? 'neg' : 'profit') + kpi('Noch offen', r.offen, r.offen > 0 ? 'open' : 'open zero');
-  const note = document.getElementById('price-note');
-  note.textContent = r.p.valid_from ? `Gerechnet mit den Preisen gültig ab ${dayDE(r.p.valid_from)}.` : 'Noch keine Preise hinterlegt.';
-  if (e.status === 'offen' && e.teil !== null && e.teil > r.umsatz) note.textContent += ' Achtung: Der Teilbetrag ist größer als der Umsatz.';
+function confirmLeave() {
+  if (!S.formDirty) return true;
+  const btn = document.getElementById('bk-save');
+  toast('Der Eintrag ist noch nicht gespeichert. Erst „Speichern“ oder „Abbrechen“ tippen.');
+  btn?.scrollIntoView({ block: 'center' });
+  S.formDirty = false; // zweiter Versuch wird durchgelassen
+  return false;
 }
 function kpi(label, val, cls = '', delta = '') {
   return `<div class="kpi ${cls}"><div class="lbl">${label}</div><div class="val">${eur(val)}</div>${delta}</div>`;
 }
 
-/* ---------- Tabellen für Woche und Monat ---------- */
-function gridTable(days, opts = {}) {
-  const head = `<tr><th class="l">Tag</th>${FIELDS.map(f => `<th class="${f.endsWith('b') ? 'bon' : ''}">${LABEL[f]}</th>`).join('')}<th>Manuell</th><th class="l">Status</th><th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Offen</th></tr>`;
+/* ---------- Übersichtstabelle für Woche und Monat ---------- */
+function summaryTable(days, opts = {}) {
   const today = todayStr();
+  const cells = t => `<td class="num">${eur(t.umsatz)}</td><td class="num dim">${eur(t.einkauf)}</td><td class="num ${t.profit < 0 ? 'neg' : ''}">${eur(t.profit)}</td><td class="num ${t.offen > 0 ? 'open' : 'dim'}">${t.offen ? eur(t.offen) : '–'}</td>`;
   const rows = days.map(d => {
-    const e = getEntry(d), r = calc(e), w = wd(d);
-    return `<tr data-day="${d}" class="${w === 0 || w === 6 ? 'weekend' : ''} ${d === today ? 'today' : ''}">
-      <td><a href="#tag" class="daylink" data-open="${d}">${WD[w]} ${dayShort(d)}</a></td>
-      ${FIELDS.map(f => `<td><input class="cell" data-f="${f}" inputmode="decimal" value="${e[f] ? numFmt.format(e[f]) : ''}" aria-label="${LABEL[f]} am ${dayDE(d)}"></td>`).join('')}
-      <td><input class="cell wide" data-f="manuell" inputmode="decimal" value="${e.manuell ? numFmt.format(e.manuell) : ''}" aria-label="Manuell am ${dayDE(d)}"></td>
-      <td class="l"><select class="cell ${e.status}" data-f="status" aria-label="Status am ${dayDE(d)}"><option value="">—</option><option value="offen" ${e.status === 'offen' ? 'selected' : ''}>offen</option><option value="bezahlt" ${e.status === 'bezahlt' ? 'selected' : ''}>bezahlt</option></select></td>
-      ${calcCells(r)}
-    </tr>`;
+    const t = dayTotals(d), w = wd(d);
+    return `<tr data-day="${d}" class="click ${w === 0 || w === 6 ? 'weekend' : ''} ${d === today ? 'today' : ''} ${t.n ? '' : 'empty'}">
+      <td><a href="#tag" class="daylink" data-open="${d}">${WD[w]} ${dayShort(d)}</a></td><td class="num">${t.n || ''}</td>
+      ${FIELDS.map(f => `<td class="num ${f.endsWith('b') ? 'bon' : ''}">${t.units[f] ? num(t.units[f]) : ''}</td>`).join('')}${cells(t)}</tr>`;
   }).join('');
-  return `<div class="table-wrap" style="${opts.maxH ? `max-height:${opts.maxH};` : ''}"><table class="grid"><thead>${head}</thead><tbody>${rows}</tbody><tfoot>${footRow(days)}</tfoot></table></div>`;
+  const s = sumDays(days);
+  const foot = `<tr><td>Summe</td><td class="num">${s.n || ''}</td>${FIELDS.map(f => `<td class="num">${s.units[f] ? num(s.units[f]) : ''}</td>`).join('')}${cells(s)}</tr>`;
+  return `<div class="table-wrap" style="${opts.maxH ? `max-height:${opts.maxH};` : ''}"><table class="grid"><thead><tr><th class="l">Tag</th><th>Einträge</th>${FIELDS.map(f => `<th class="${f.endsWith('b') ? 'bon' : ''}">${LABEL[f]}</th>`).join('')}<th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Offen</th></tr></thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table></div>`;
 }
-function calcCells(r) {
-  return `<td class="num" data-c="umsatz">${eur(r.umsatz)}</td><td class="num dim" data-c="einkauf">${eur(r.einkauf)}</td>
-    <td class="num ${r.profit < 0 ? 'neg' : ''}" data-c="profit">${eur(r.profit)}</td><td class="num ${r.offen > 0 ? 'open' : 'dim'}" data-c="offen">${r.offen ? eur(r.offen) : '–'}</td>`;
-}
-function footRow(days) {
-  const t = sumDays(days);
-  return `<tr><td>Summe</td>${FIELDS.map(f => `<td class="num">${t.units[f] ? num(t.units[f]) : ''}</td>`).join('')}<td class="num">${t.manuell ? eur(t.manuell) : ''}</td><td></td>
-    <td class="num">${eur(t.umsatz)}</td><td class="num">${eur(t.einkauf)}</td><td class="num ${t.profit < 0 ? 'neg' : ''}">${eur(t.profit)}</td><td class="num ${t.offen ? 'open' : ''}">${t.offen ? eur(t.offen) : '–'}</td></tr>`;
-}
-function wireGrid(el, days, onChange) {
-  el.querySelectorAll('[data-open]').forEach(a => a.onclick = ev => { ev.preventDefault(); setDay(a.dataset.open); location.hash = 'tag'; });
-  el.querySelectorAll('tbody tr').forEach(tr => {
-    const d = tr.dataset.day;
-    const refresh = () => {
-      const r = calc(getEntry(d));
-      tr.querySelectorAll('[data-c]').forEach(td => td.remove());
-      tr.insertAdjacentHTML('beforeend', calcCells(r));
-      el.querySelector('tfoot').innerHTML = footRow(days);
-      onChange && onChange();
-    };
-    tr.querySelectorAll('input.cell').forEach(inp => {
-      inp.oninput = () => {
-        const v = parseNum(inp.value), f = inp.dataset.f;
-        const bad = isNaN(v) || (f !== 'manuell' && v < 0);
-        inp.classList.toggle('bad', bad);
-        if (!bad) { setField(d, f, v); refresh(); }
-      };
-      inp.onblur = () => { const v = parseNum(inp.value); if (!isNaN(v)) inp.value = v ? numFmt.format(v) : ''; };
-      inp.onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); const next = tr.nextElementSibling?.querySelector(`[data-f="${inp.dataset.f}"]`); next?.focus(); next?.select?.(); } };
-    });
-    const sel = tr.querySelector('select.cell');
-    sel.onchange = () => { sel.className = `cell ${sel.value}`; setField(d, 'status', sel.value); refresh(); };
-  });
+function wireSummary(el) {
+  el.querySelectorAll('tr.click').forEach(tr => tr.onclick = ev => { ev.preventDefault(); setDay(tr.dataset.day); S.edit = null; location.hash = 'tag'; });
 }
 
 /* ---------- Diagramme ---------- */
@@ -500,25 +548,19 @@ function viewWoche(el) {
   el.innerHTML = `
     <div class="card"><div class="period">
       <button class="btn" data-nav="-7" aria-label="Vorherige Woche">‹</button>
-      <div class="period-title"><h2>KW ${isoWeek(ws)} · ${dayShort(ws)} – ${dayDE(days[6])}</h2><span class="sub">Zahlen direkt in die Tabelle tippen. Auf den Tag tippen für Info und Teilbetrag.</span></div>
+      <div class="period-title"><h2>KW ${isoWeek(ws)} · ${dayShort(ws)} – ${dayDE(days[6])}</h2><span class="sub">Auf einen Tag tippen, um Einträge zu sehen oder neue zu machen.</span></div>
       <button class="btn" data-nav="7" aria-label="Nächste Woche">›</button>
     </div></div>
     <div class="kpis" id="w-kpis"></div>
-    <div class="card"><h3>Eintragen</h3>${gridTable(days)}</div>
+    <div class="card"><h3>Übersicht</h3>${summaryTable(days)}</div>
     <div class="card"><h3>Woche im Diagramm</h3><div id="w-leg"></div><div class="chart-box short"><canvas id="w-chart" aria-label="Umsatz, Einkauf und Profit pro Tag"></canvas></div></div>`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addDays(S.day, +b.dataset.nav)); render(); });
-  let chart;
-  const draw = () => {
-    paintKpis('w-kpis', sumDays(days));
-    const rs = days.map(d => calc(getEntry(d)));
-    const colors = days.map(d => monthColor(monthKey(d)));
-    el.querySelector('#w-leg').innerHTML = legend([['Umsatz (Farbe = Monat)', colors[0]], ['Einkauf', css('--cost')], ['Profit', css('--ink'), true]]);
-    if (chart) { chart.destroy(); S.charts = S.charts.filter(c => c !== chart); }
-    chart = moneyChart(el.querySelector('#w-chart'), days.map(d => `${WD[wd(d)]} ${dayShort(d)}`),
-      { umsatz: rs.map(r => r.umsatz), umsatzColors: colors, einkauf: rs.map(r => r.einkauf), profit: rs.map(r => r.profit) });
-  };
-  draw();
-  let t; wireGrid(el, days, () => { paintKpis('w-kpis', sumDays(days)); clearTimeout(t); t = setTimeout(draw, 600); });
+  wireSummary(el);
+  paintKpis('w-kpis', sumDays(days));
+  const rs = days.map(dayTotals), colors = days.map(d => monthColor(monthKey(d)));
+  el.querySelector('#w-leg').innerHTML = legend([['Umsatz (Farbe = Monat)', colors[0]], ['Einkauf', css('--cost')], ['Profit', css('--ink'), true]]);
+  moneyChart(el.querySelector('#w-chart'), days.map(d => `${WD[wd(d)]} ${dayShort(d)}`),
+    { umsatz: rs.map(r => r.umsatz), umsatzColors: colors, einkauf: rs.map(r => r.einkauf), profit: rs.map(r => r.profit) });
 }
 function paintKpis(id, t, prev) {
   const box = document.getElementById(id); if (!box) return;
@@ -538,26 +580,27 @@ function viewMonat(el) {
   el.innerHTML = `
     <div class="card"><div class="month-band" style="margin:-4px 0 12px"></div><div class="period">
       <button class="btn" data-nav="-1" aria-label="Vorheriger Monat">‹</button>
-      <div class="period-title"><h2><span class="month-chip"></span>${monthName(mk)}</h2><span class="sub">${days.length} Tage · Zahlen direkt eintippen, Enter springt zum nächsten Tag</span></div>
+      <div class="period-title"><h2><span class="month-chip"></span>${monthName(mk)}</h2><span class="sub">Auf einen Tag tippen, um Einträge zu sehen oder neue zu machen.</span></div>
       <button class="btn" data-nav="1" aria-label="Nächster Monat">›</button>
     </div></div>
     <div class="kpis" id="m-kpis"></div>
-    <div class="card"><h3>Umsatz, Einkauf und Profit pro Tag</h3><div id="m-leg"></div><div class="chart-box"><canvas id="m-chart" aria-label="Tageswerte im ${monthName(mk)}"></canvas></div></div>
-    <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Eintragen</h3><button class="btn sm" id="m-csv">Monat als CSV</button></div>${gridTable(days, { maxH: '70vh' })}</div>`;
+    <div class="card"><h3>Umsatz, Einkauf und Profit pro Tag</h3>${legend([['Umsatz', col], ['Einkauf', css('--cost')], ['Profit', css('--ink'), true]])}<div class="chart-box"><canvas id="m-chart" aria-label="Tageswerte im ${monthName(mk)}"></canvas></div></div>
+    <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Alle Tage</h3><button class="btn sm" id="m-csv">Monat als CSV</button></div>${summaryTable(days, { maxH: '70vh' })}</div>`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addMonths(mk, +b.dataset.nav) + '-01'); render(); });
   el.querySelector('#m-csv').onclick = () => exportCSV(days, `Monatsbuch_${S.owner.name}_${mk}.csv`);
-  let chart;
-  const draw = () => {
-    const rs = days.map(d => calc(getEntry(d)));
-    el.querySelector('#m-leg').innerHTML = legend([['Umsatz', col], ['Einkauf', css('--cost')], ['Profit', css('--ink'), true]]);
-    if (chart) { chart.destroy(); S.charts = S.charts.filter(c => c !== chart); }
-    chart = moneyChart(el.querySelector('#m-chart'), days.map(d => String(Number(d.slice(8)))),
-      { umsatz: rs.map(r => r.umsatz), color: col, einkauf: rs.map(r => r.einkauf), profit: rs.map(r => r.profit) },
-      { titles: days.map(d => `${WD[wd(d)]}, ${dayDE(d)}`) });
-  };
+  wireSummary(el);
   paintKpis('m-kpis', sumDays(days), sumDays(monthDays(addMonths(mk, -1))));
-  draw();
-  let t; wireGrid(el, days, () => { paintKpis('m-kpis', sumDays(days), sumDays(monthDays(addMonths(mk, -1)))); clearTimeout(t); t = setTimeout(draw, 700); });
+  const rs = days.map(dayTotals);
+  moneyChart(el.querySelector('#m-chart'), days.map(d => String(Number(d.slice(8)))),
+    { umsatz: rs.map(r => r.umsatz), color: col, einkauf: rs.map(r => r.einkauf), profit: rs.map(r => r.profit) },
+    { titles: days.map(d => `${WD[wd(d)]}, ${dayDE(d)}`) });
+}
+
+function customersBlock(t, title) {
+  const arr = [...t.customers.values()].sort((a, b) => b.umsatz - a.umsatz).slice(0, 10);
+  return `<div class="card"><h3>${title}</h3>${arr.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Spitzname</th><th>Käufe</th><th>Umsatz</th><th>Profit</th><th>Noch offen</th><th>Zuletzt</th></tr></thead><tbody>
+    ${arr.map(c => `<tr><td>${esc(nickLabel(c.nick))}</td><td class="num">${c.n}</td><td class="num">${eur(c.umsatz)}</td><td class="num ${c.profit < 0 ? 'neg' : ''}">${eur(c.profit)}</td><td class="num ${c.offen ? 'open' : 'dim'}">${c.offen ? eur(c.offen) : '–'}</td><td class="num dim">${dayShort(c.last)}</td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="muted" style="margin:0">Noch keine Einträge.</p>'}</div>`;
 }
 
 /* ---------- Ansicht: Auswertung ---------- */
@@ -584,6 +627,7 @@ function factsBlock(t, daysInPeriod) {
   const marge = t.umsatz ? t.profit / t.umsatz * 100 : NaN;
   const rows = [
     ['Tage mit Einträgen', `${t.active}${daysInPeriod ? ` von ${daysInPeriod}` : ''}`],
+    ['Einträge', num(t.n)],
     ['Ø Umsatz pro Arbeitstag', t.active ? eur(t.umsatz / t.active) : '–'],
     ['Ø Profit pro Arbeitstag', t.active ? eur(t.profit / t.active) : '–'],
     ['Marge (Profit ÷ Umsatz)', pct(marge)],
@@ -610,17 +654,18 @@ function statsMonth(el) {
     <div class="two">
       <div class="card"><h3>Profit im Monat aufsummiert</h3>${legend([['Profit kumuliert', col, true]])}<div class="chart-box short"><canvas id="s-cum"></canvas></div></div>
       ${factsBlock(t, days.length)}
-    </div>`;
+    </div>
+    ${customersBlock(t, 'Kunden im ' + MONTHS[monthIdx(mk)])}`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addMonths(mk, +b.dataset.nav) + '-01'); render(); });
   paintKpis('s-kpis', t, prev);
-  const rs = days.map(d => calc(getEntry(d)));
+  const rs = days.map(dayTotals);
   const labels = days.map(d => String(Number(d.slice(8)))), titles = days.map(d => `${WD[wd(d)]}, ${dayDE(d)}`);
   moneyChart(el.querySelector('#s-chart'), labels, { umsatz: rs.map(r => r.umsatz), color: col, einkauf: rs.map(r => r.einkauf), profit: rs.map(r => r.profit) }, { titles });
   let acc = 0; const cum = rs.map(r => (acc += r.profit));
   moneyChart(el.querySelector('#s-cum'), labels, { cum, cumColor: col }, { titles });
 }
 function monthRange() {
-  const keys = [...S.entries.keys()].sort();
+  const keys = allDays();
   const cur = monthKey(todayStr());
   if (!keys.length) return [cur];
   let a = monthKey(keys[0]), b = monthKey(keys[keys.length - 1]);
@@ -631,7 +676,7 @@ function monthRange() {
 function statsAll(el) {
   const months = monthRange();
   const per = months.map(k => ({ k, t: sumDays(monthDays(k)) }));
-  const all = sumDays([...S.entries.keys()]);
+  const all = sumDays(allDays());
   const best = per.reduce((a, b) => (!a || b.t.profit > a.t.profit ? b : a), null);
   el.innerHTML = `
     <div class="kpis" id="g-kpis"></div>
@@ -641,6 +686,7 @@ function statsAll(el) {
       <div class="card"><h3>Profit seit Beginn aufsummiert</h3><div class="chart-box short"><canvas id="g-cum"></canvas></div></div>
       ${catBlock(all)}
     </div>
+    ${customersBlock(all, 'Beste Kunden insgesamt')}
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Alle Monate</h3><button class="btn sm" id="g-csv">Alles als CSV</button></div>
       <div class="table-wrap"><table class="grid"><thead><tr><th class="l">Monat</th><th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Marge</th><th>Noch offen</th><th>Arbeitstage</th></tr></thead>
       <tbody>${per.slice().reverse().map(({ k, t }) => `<tr><td><a href="#monat" class="daylink" data-month="${k}"><span class="month-chip" style="background:${monthColor(k)}"></span>${monthName(k)}</a></td>
@@ -658,34 +704,56 @@ function statsAll(el) {
   let acc = 0;
   moneyChart(el.querySelector('#g-cum'), labels, { cum: per.map(p => (acc += p.t.profit)), cumColor: css('--accent') }, { titles });
   el.querySelectorAll('[data-month]').forEach(a => a.onclick = ev => { ev.preventDefault(); setDay(a.dataset.month + '-01'); location.hash = 'monat'; });
-  el.querySelector('#g-csv').onclick = () => exportCSV([...S.entries.keys()].sort(), `Monatsbuch_${S.owner.name}_alles.csv`);
+  el.querySelector('#g-csv').onclick = () => exportCSV(allDays(), `Monatsbuch_${S.owner.name}_alles.csv`);
 }
 
-/* ---------- Ansicht: Offen ---------- */
+/* ---------- Ansicht: Offen (nach Kunde) ---------- */
 function viewOffen(el) {
-  const items = [...S.entries.values()].filter(e => e.status === 'offen').sort((a, b) => a.day < b.day ? 1 : -1);
-  const total = items.reduce((a, e) => a + calc(e).offen, 0), totalU = items.reduce((a, e) => a + calc(e).umsatz, 0);
+  const open = S.bookings.filter(b => b.status === 'offen');
+  const groups = new Map();
+  for (const b of open) {
+    const g = groups.get(b.nick) || { nick: b.nick, items: [], offen: 0, umsatz: 0 };
+    const r = calc(b); g.items.push(b); g.offen += r.offen; g.umsatz += r.umsatz; groups.set(b.nick, g);
+  }
+  const gs = [...groups.values()].sort((a, b) => b.offen - a.offen);
+  const total = gs.reduce((a, g) => a + g.offen, 0);
   el.innerHTML = `
     <div class="kpis"><div class="kpi open ${total ? '' : 'zero'}"><div class="lbl">Noch offen</div><div class="val">${eur(total)}</div></div>
-      <div class="kpi"><div class="lbl">Offene Posten</div><div class="val">${items.length}</div></div>
-      <div class="kpi"><div class="lbl">Umsatz dieser Posten</div><div class="val">${eur(totalU)}</div></div>
-      <div class="kpi"><div class="lbl">Schon bezahlt davon</div><div class="val">${eur(totalU - total)}</div></div></div>
-    <div class="card"><h2>Offene Posten</h2>${items.length ? `<div class="list">${items.map(e => {
-      const r = calc(e);
-      return `<div class="item" data-day="${e.day}">
-        <div class="main"><div class="t"><a href="#tag" class="daylink" data-open="${e.day}">${WD[wd(e.day)]}, ${dayDE(e.day)}</a> <span class="pill offen">offen</span></div>
-          <div class="small muted">Umsatz ${eur(r.umsatz)}${e.teil !== null ? ' · Teilbetrag' : ' · ganzer Betrag'}${e.info ? ' · ' + esc(e.info) : ''}</div></div>
-        <div class="amt open">${eur(r.offen)}</div>
-        <div class="actions">
-          <input class="input mono" style="width:110px;min-height:36px" inputmode="decimal" placeholder="Rest €" value="${e.teil !== null ? numFmt.format(e.teil) : ''}" aria-label="Teilbetrag offen am ${dayDE(e.day)}" data-teil>
-          <button class="btn sm good" data-paid>Bezahlt</button></div></div>`;
-    }).join('')}</div>` : '<p class="muted" style="margin:0">Keine offenen Posten. Wenn du im Tag-Reiter oder in Woche/Monat den Status auf „offen“ stellst, erscheint der Posten hier.</p>'}</div>`;
-  el.querySelectorAll('[data-open]').forEach(a => a.onclick = ev => { ev.preventDefault(); setDay(a.dataset.open); location.hash = 'tag'; });
-  el.querySelectorAll('.item[data-day]').forEach(it => {
-    const d = it.dataset.day;
-    it.querySelector('[data-paid]').onclick = () => { setField(d, 'status', 'bezahlt'); toast(`${dayDE(d)} als bezahlt markiert`); render(); };
+      <div class="kpi"><div class="lbl">Kunden</div><div class="val">${gs.length}</div></div>
+      <div class="kpi"><div class="lbl">Offene Posten</div><div class="val">${open.length}</div></div>
+      <div class="kpi"><div class="lbl">Schon angezahlt</div><div class="val">${eur(gs.reduce((a, g) => a + g.umsatz, 0) - total)}</div></div></div>
+    ${gs.length ? gs.map(g => `
+      <div class="card cust" data-nick="${esc(g.nick)}">
+        <div class="row" style="margin-bottom:6px"><div class="grow"><h3 style="margin:0">${esc(nickLabel(g.nick))}</h3><span class="small muted">${g.items.length} ${g.items.length === 1 ? 'Posten' : 'Posten'} · Umsatz ${eur(g.umsatz)}</span></div>
+          <div class="amt open" style="font-size:19px">${eur(g.offen)}</div></div>
+        <div class="list">${g.items.sort((a, b) => a.day < b.day ? -1 : 1).map(b => { const r = calc(b); return `
+          <div class="item" data-id="${b.id}">
+            <div class="main"><div class="t"><a href="#tag" class="daylink" data-open="${b.day}" data-id="${b.id}">${WD[wd(b.day)]}, ${dayDE(b.day)}</a></div>
+              <div class="small muted">${itemsText(b)} · Umsatz ${eur(r.umsatz)}${b.info ? ' · ' + esc(b.info) : ''}</div></div>
+            <div class="amt open">${eur(r.offen)}</div>
+            <div class="actions"><input class="input mono" style="width:100px;min-height:36px" inputmode="decimal" placeholder="Rest €" value="${b.teil !== null ? numFmt.format(b.teil) : ''}" aria-label="Noch offen" data-teil>
+              <button class="btn sm good" data-paid>Bezahlt</button></div></div>`; }).join('')}</div>
+        ${g.items.length > 1 ? `<div class="row" style="margin-top:10px"><button class="btn sm good" data-allpaid>Alles von ${esc(nickLabel(g.nick))} bezahlt</button></div>` : ''}
+      </div>`).join('') : '<div class="card"><p class="muted" style="margin:0">Keine offenen Posten. Wenn du bei einem Eintrag „noch offen“ wählst, erscheint er hier, sortiert nach Kunde.</p></div>'}`;
+  el.querySelectorAll('[data-open]').forEach(a => a.onclick = ev => { ev.preventDefault(); setDay(a.dataset.open); S.edit = S.bookings.find(x => x.id === Number(a.dataset.id)) || null; location.hash = 'tag'; });
+  const find = id => S.bookings.find(x => x.id === id);
+  el.querySelectorAll('.item[data-id]').forEach(it => {
+    const id = Number(it.dataset.id);
+    it.querySelector('[data-paid]').onclick = async () => {
+      try { await saveBooking({ ...find(id), status: 'bezahlt' }); toast(`${nickLabel(find(id).nick)}: als bezahlt markiert`); render(); } catch (e) { toast(e.message); }
+    };
     const inp = it.querySelector('[data-teil]');
-    inp.onchange = () => { const raw = inp.value.trim(), v = parseNum(raw); if (raw === '') setField(d, 'teil', null); else if (!isNaN(v) && v >= 0) setField(d, 'teil', v); else return inp.classList.add('bad'); render(); };
+    inp.onchange = async () => {
+      const raw = inp.value.trim(), v = parseNum(raw);
+      if (raw !== '' && (isNaN(v) || v < 0)) return inp.classList.add('bad');
+      try { await saveBooking({ ...find(id), teil: raw === '' ? null : v }); render(); } catch (e) { toast(e.message); }
+    };
+  });
+  el.querySelectorAll('[data-allpaid]').forEach(btn => btn.onclick = async () => {
+    if (btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = 'Wirklich alle als bezahlt markieren?'; return; }
+    const nick = btn.closest('.cust').dataset.nick;
+    try { for (const b of S.bookings.filter(x => x.status === 'offen' && x.nick === nick)) await saveBooking({ ...b, status: 'bezahlt' }); toast(`${nickLabel(nick)}: alles bezahlt`); render(); }
+    catch (e) { toast(e.message); render(); }
   });
 }
 
@@ -796,21 +864,21 @@ function viewExport(el) {
     <p class="muted">CSV-Dateien öffnen sich in Excel und Google Sheets. Getrennt mit Semikolon, Komma als Dezimalzeichen.</p>
     <div class="row"><button class="btn" id="x-m">${monthName(mk)}</button><button class="btn primary" id="x-a">Alle Tage</button></div></div>`;
   el.querySelector('#x-m').onclick = () => exportCSV(monthDays(mk), `Monatsbuch_${S.owner.name}_${mk}.csv`);
-  el.querySelector('#x-a').onclick = () => exportCSV([...S.entries.keys()].sort(), `Monatsbuch_${S.owner.name}_alles.csv`);
+  el.querySelector('#x-a').onclick = () => exportCSV(allDays(), `Monatsbuch_${S.owner.name}_alles.csv`);
 }
 function exportCSV(days, filename) {
   const n = v => String(Math.round((v || 0) * 100) / 100).replace('.', ',');
   const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  const head = ['Datum', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
+  const head = ['Datum', 'Spitzname', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
   const lines = [head.join(';')];
-  for (const d of days) {
-    const e = S.entries.get(d); if (!e) continue; const r = calc(e);
-    lines.push([dayDE(d), ...FIELDS.map(f => n(e[f])), n(e.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), e.status, e.teil === null ? '' : n(e.teil), n(r.offen), q(e.info)].join(';'));
+  for (const d of days) for (const b of dayBookings(d)) {
+    const r = calc(b);
+    lines.push([dayDE(d), q(b.nick), ...FIELDS.map(f => n(b[f])), n(b.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), b.status, b.teil === null ? '' : n(b.teil), n(r.offen), q(b.info)].join(';'));
   }
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename.replace(/[^\wäöüÄÖÜß.-]+/g, '_');
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-  toast(`${lines.length - 1} Tage exportiert`);
+  toast(`${lines.length - 1} Einträge exportiert`);
 }
 
 boot();
