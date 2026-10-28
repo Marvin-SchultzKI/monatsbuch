@@ -25,7 +25,7 @@ const ZERO_P = { c: 0, w: 0, s: 0, k: 0, cb: 0, wb: 0, sb: 0, kb: 0, valid_from:
 
 const S = {
   csrf: '', me: null, owner: null, users: [], bookings: [], byDay: new Map(), prices: [], eff: [],
-  view: 'tag', day: todayStr(), statsMode: 'monat', edit: null, formDirty: false,
+  view: 'tag', day: todayStr(), statsMode: 'monat', edit: null, formDirty: false, places: [], place: 'all',
   saving: 0, saveError: null, charts: [],
 };
 const app = document.getElementById('app');
@@ -86,9 +86,19 @@ function mode() { return isDark() ? 'dark' : 'light'; }
 function monthColor(key) { return MONTH_COLORS[mode()][monthIdx(key)]; }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 function blankBooking(day) { return { id: 0, day, nick: '', c: 0, cb: 0, w: 0, wb: 0, s: 0, sb: 0, k: 0, kb: 0, manuell: 0, info: '', status: 'bezahlt', teil: null }; }
+const PLACE_COLORS = ['#0B6A86', '#B5517A', '#7F9A00', '#9A5B2E', '#5B4FCF', '#D19A00', '#1D7A4B', '#C2410C'];
+function inPlace(b) { return S.place === 'all' ? true : S.place === 'none' ? !b.place_id : b.place_id === S.place; }
+function visibleBookings() { return S.bookings.filter(inPlace); }
+function placeById(id) { return S.places.find(p => p.id === id) || null; }
+function placeName(id) { const p = placeById(id); return p ? p.name : 'ohne Stelle'; }
+function placeColor(id) { const i = S.places.findIndex(p => p.id === id); return i < 0 ? 'var(--ink-3)' : PLACE_COLORS[i % PLACE_COLORS.length]; }
+function placeKey() { return 'mb-place-' + (S.owner ? S.owner.id : ''); }
+function setPlace(v) { S.place = v; try { sessionStorage.setItem(placeKey(), String(v)); } catch {} indexBookings(); }
+function placeTag(id) { return `<span class="ptag"><i style="background:${placeColor(id)}"></i>${esc(placeName(id))}</span>`; }
 function indexBookings() {
   S.byDay = new Map();
-  for (const b of S.bookings) { if (!S.byDay.has(b.day)) S.byDay.set(b.day, []); S.byDay.get(b.day).push(b); }
+  for (const b of S.bookings) {
+    if (!inPlace(b)) continue; if (!S.byDay.has(b.day)) S.byDay.set(b.day, []); S.byDay.get(b.day).push(b); }
 }
 function dayBookings(day) { return S.byDay.get(day) || []; }
 function allDays() { return [...S.byDay.keys()].sort(); }
@@ -199,7 +209,10 @@ async function loadData(uid) {
   try { d = await api('data', null, `&u=${encodeURIComponent(uid)}`); }
   catch (e) { if (String(uid) !== String(S.me.id)) d = await api('data', null, `&u=${S.me.id}`); else throw e; }
   S.owner = d.owner; S.users = d.users || []; S.prices = d.prices;
-  S.bookings = d.bookings || []; indexBookings();
+  S.bookings = d.bookings || []; S.places = d.places || [];
+  let pl = 'all'; try { pl = sessionStorage.getItem(placeKey()) || 'all'; } catch {}
+  S.place = pl === 'all' || pl === 'none' ? pl : (placeById(Number(pl)) ? Number(pl) : 'all');
+  indexBookings();
   buildEff();
   try { sessionStorage.setItem('mb-owner', String(S.owner.id)); } catch {}
 }
@@ -293,6 +306,7 @@ function renderShell() {
     <div class="menu" id="menu" hidden>
       <div class="who">Angemeldet als <b>${esc(S.me.name)}</b>${S.me.isAdmin ? ' · Admin' : ''}</div>
       ${S.me.isAdmin ? '<button data-go="benutzer">Benutzer verwalten</button>' : ''}
+      <button data-go="stellen">Anlaufstellen</button>
       <button data-go="konto">Passwort ändern</button>
       <button data-go="export">Daten exportieren (CSV)</button>
       ${S.me.isAdmin ? '<button id="backup-dl">Sicherung herunterladen</button>' : ''}
@@ -317,7 +331,7 @@ function renderShell() {
 
 function route() {
   const h = (location.hash || '#tag').slice(1);
-  const known = ['tag', 'woche', 'monat', 'auswertung', 'offen', 'preise', 'benutzer', 'konto', 'export'];
+  const known = ['tag', 'woche', 'monat', 'auswertung', 'offen', 'preise', 'benutzer', 'konto', 'export', 'stellen'];
   S.view = known.includes(h) ? h : 'tag';
   if (S.view === 'benutzer' && !S.me.isAdmin) S.view = 'tag';
   document.querySelectorAll('.tab').forEach(t => { if (t.dataset.tab === S.view) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current'); });
@@ -329,6 +343,12 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', (
 function setDay(d) { S.day = d; try { sessionStorage.setItem('mb-day', d); } catch {} }
 
 function destroyCharts() { S.charts.forEach(c => c.destroy()); S.charts = []; }
+function placeBar() {
+  if (!S.places.length) return '';
+  const hasNone = S.bookings.some(b => !b.place_id);
+  const chip = (v, label, color) => `<button type="button" class="pchip" data-place="${v}" aria-pressed="${String(S.place) === String(v)}">${color ? `<i style="background:${color}"></i>` : ''}${esc(label)}</button>`;
+  return `<nav class="pbar" aria-label="Anlaufstelle">${chip('all', 'Alle')}${S.places.map(p => chip(p.id, p.name, placeColor(p.id))).join('')}${hasNone ? chip('none', 'ohne Stelle', 'var(--ink-3)') : ''}</nav>`;
+}
 function render() {
   destroyCharts();
   const v = document.getElementById('view'); if (!v) return;
@@ -339,7 +359,10 @@ function render() {
     ? `<div class="banner warn">Es sind noch keine Preise hinterlegt, deshalb rechnet alles mit 0 €. <a href="#preise">Jetzt Preise eintragen</a></div>` : '';
   v.innerHTML = otherBanner + noPrices + '<div id="inner" style="display:flex;flex-direction:column;gap:16px"></div>';
   const inner = document.getElementById('inner');
-  ({ tag: viewTag, woche: viewWoche, monat: viewMonat, auswertung: viewAuswertung, offen: viewOffen, preise: viewPreise, benutzer: viewBenutzer, konto: viewKonto, export: viewExport })[S.view](inner);
+  const bar = ['tag', 'woche', 'monat', 'auswertung', 'offen'].includes(S.view) ? placeBar() : '';
+  if (bar) inner.insertAdjacentHTML('beforebegin', bar);
+  v.querySelectorAll('[data-place]').forEach(b => b.onclick = () => { if (!confirmLeave()) return; const x = b.dataset.place; setPlace(x === 'all' || x === 'none' ? x : Number(x)); S.edit = null; render(); });
+  ({ tag: viewTag, woche: viewWoche, monat: viewMonat, auswertung: viewAuswertung, offen: viewOffen, preise: viewPreise, benutzer: viewBenutzer, konto: viewKonto, export: viewExport, stellen: viewStellen })[S.view](inner);
   window.scrollTo({ top: 0 });
 }
 
@@ -371,6 +394,9 @@ function viewTag(el) {
       <div class="row" style="margin-bottom:12px"><h2 class="grow" style="margin:0" id="bk-title">${editing ? 'Eintrag bearbeiten' : 'Neuer Eintrag'}</h2>
         <button class="btn sm" type="button" id="bk-cancel" ${editing ? '' : 'hidden'}>Abbrechen</button></div>
       <form id="bk-form" autocomplete="off" style="display:flex;flex-direction:column;gap:12px">
+        ${S.places.length ? `<div class="field">Gemeldet bei
+          <div class="seg seg-wrap" role="group" aria-label="Gemeldet bei" id="bk-place">${S.places.map(pl => `<button type="button" data-pid="${pl.id}"><i style="background:${placeColor(pl.id)}"></i>${esc(pl.name)}</button>`).join('')}</div></div>`
+          : `<p class="small muted" style="margin:0">Tipp: Unter ☰ → <a href="#stellen">Anlaufstellen</a> legst du an, wo sich Kunden melden (z. B. Lottogeschäft, Handy-Reparatur).</p>`}
         <label class="field">Spitzname
           <input class="input" id="bk-nick" list="bk-nicks" maxlength="40" placeholder="z. B. Kalle" autocapitalize="words"></label>
         <datalist id="bk-nicks">${knownNicks().map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>
@@ -394,7 +420,7 @@ function viewTag(el) {
     <div class="card"><h3>Einträge am ${dayShort(day)}${list.length ? ` <span class="muted">(${list.length})</span>` : ''}</h3>
       ${list.length ? `<div class="list">${list.map(b => { const r = calc(b); return `
         <button type="button" class="bk-item ${editing && editing.id === b.id ? 'sel' : ''}" data-id="${b.id}">
-          <span class="main"><span class="t">${esc(nickLabel(b.nick))}${b.status === 'offen' ? ' <span class="pill offen">offen</span>' : ''}</span>
+          <span class="main"><span class="t">${esc(nickLabel(b.nick))}${b.status === 'offen' ? ' <span class="pill offen">offen</span>' : ''}${S.place === 'all' && S.places.length ? ' ' + placeTag(b.place_id) : ''}</span>
             <span class="small muted">${itemsText(b)}${b.info ? ' · ' + esc(b.info) : ''}</span></span>
           <span class="amt">${eur(r.umsatz)}${r.offen ? `<span class="small open">offen ${eur(r.offen)}</span>` : ''}</span>
         </button>`; }).join('')}</div>` : '<p class="muted" style="margin:0">Noch keine Einträge an diesem Tag.</p>'}
@@ -412,7 +438,11 @@ function viewTag(el) {
   const $ = s => form.querySelector(s);
   let status = 'bezahlt';
   const setStatus = v => { status = v; form.querySelectorAll('#bk-status button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === v))); $('#bk-teil-wrap').hidden = v !== 'offen'; };
+  let placeId = null;
+  const setPlaceSel = id => { placeId = id; form.querySelectorAll('#bk-place button').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.pid) === id))); };
+  const lastPlace = () => { try { const v = Number(localStorage.getItem('mb-lastplace-' + S.owner.id)); return placeById(v) ? v : null; } catch { return null; } };
   const fill = b => {
+    setPlaceSel(b.id ? (b.place_id || null) : (typeof S.place === 'number' ? S.place : lastPlace()));
     $('#bk-nick').value = b.nick || '';
     FIELDS.forEach(f => { $(`[data-f="${f}"]`).value = b[f] ? numFmt.format(b[f]) : ''; });
     $('#bk-info').value = b.info || '';
@@ -425,6 +455,8 @@ function viewTag(el) {
     const b = { ...(S.edit || blankBooking(day)), day };
     let bad = null;
     b.nick = $('#bk-nick').value.trim();
+    b.place_id = placeId;
+    if (S.places.length && !placeId) bad = 'Bitte oben auswählen, wo sich der Kunde gemeldet hat.';
     FIELDS.forEach(f => { const inp = $(`[data-f="${f}"]`), v = parseNum(inp.value); const isBad = isNaN(v) || v < 0; inp.classList.toggle('bad', isBad); if (isBad) bad = `${LABEL[f]}: bitte eine Zahl ab 0`; else b[f] = v; });
     const m = parseNum($('#bk-manuell').value); $('#bk-manuell').classList.toggle('bad', isNaN(m)); if (isNaN(m)) bad = 'Manuell: bitte eine Zahl'; else b.manuell = m;
     const tr = $('#bk-teil').value.trim(), tv = parseNum(tr);
@@ -441,6 +473,7 @@ function viewTag(el) {
   paintSum();
   S.formDirty = false;
   form.addEventListener('input', () => { S.formDirty = true; paintSum(); });
+  form.querySelectorAll('#bk-place button').forEach(x => x.onclick = () => { setPlaceSel(Number(x.dataset.pid)); S.formDirty = true; try { localStorage.setItem('mb-lastplace-' + S.owner.id, x.dataset.pid); } catch {} });
   form.querySelectorAll('#bk-status button').forEach(x => x.onclick = () => { setStatus(x.dataset.v); S.formDirty = true; paintSum(); });
   form.querySelectorAll('.qty input').forEach(inp => inp.addEventListener('focus', () => inp.select()));
   form.onsubmit = async ev => {
@@ -655,6 +688,7 @@ function statsMonth(el) {
       <div class="card"><h3>Profit im Monat aufsummiert</h3>${legend([['Profit kumuliert', col, true]])}<div class="chart-box short"><canvas id="s-cum"></canvas></div></div>
       ${factsBlock(t, days.length)}
     </div>
+    ${placesBlock(days)}
     ${customersBlock(t, 'Kunden im ' + MONTHS[monthIdx(mk)])}`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addMonths(mk, +b.dataset.nav) + '-01'); render(); });
   paintKpis('s-kpis', t, prev);
@@ -686,6 +720,7 @@ function statsAll(el) {
       <div class="card"><h3>Profit seit Beginn aufsummiert</h3><div class="chart-box short"><canvas id="g-cum"></canvas></div></div>
       ${catBlock(all)}
     </div>
+    ${placesBlock(allDays())}
     ${customersBlock(all, 'Beste Kunden insgesamt')}
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Alle Monate</h3><button class="btn sm" id="g-csv">Alles als CSV</button></div>
       <div class="table-wrap"><table class="grid"><thead><tr><th class="l">Monat</th><th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Marge</th><th>Noch offen</th><th>Arbeitstage</th></tr></thead>
@@ -709,7 +744,7 @@ function statsAll(el) {
 
 /* ---------- Ansicht: Offen (nach Kunde) ---------- */
 function viewOffen(el) {
-  const open = S.bookings.filter(b => b.status === 'offen');
+  const open = visibleBookings().filter(b => b.status === 'offen');
   const groups = new Map();
   for (const b of open) {
     const g = groups.get(b.nick) || { nick: b.nick, items: [], offen: 0, umsatz: 0 };
@@ -752,8 +787,69 @@ function viewOffen(el) {
   el.querySelectorAll('[data-allpaid]').forEach(btn => btn.onclick = async () => {
     if (btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = 'Wirklich alle als bezahlt markieren?'; return; }
     const nick = btn.closest('.cust').dataset.nick;
-    try { for (const b of S.bookings.filter(x => x.status === 'offen' && x.nick === nick)) await saveBooking({ ...b, status: 'bezahlt' }); toast(`${nickLabel(nick)}: alles bezahlt`); render(); }
+    try { for (const b of visibleBookings().filter(x => x.status === 'offen' && x.nick === nick)) await saveBooking({ ...b, status: 'bezahlt' }); toast(`${nickLabel(nick)}: alles bezahlt`); render(); }
     catch (e) { toast(e.message); render(); }
+  });
+}
+
+/* ---------- Anlaufstellen ---------- */
+function placesBlock(days) {
+  if (S.place !== 'all' || !S.places.length) return '';
+  const set = new Set(days), rows = new Map();
+  for (const b of S.bookings) {
+    if (!set.has(b.day)) continue;
+    const k = b.place_id || 0, r = calc(b), x = rows.get(k) || { id: k, umsatz: 0, profit: 0, offen: 0, n: 0 };
+    x.umsatz += r.umsatz; x.profit += r.profit; x.offen += r.offen; x.n++; rows.set(k, x);
+  }
+  const arr = [...S.places.map(p => rows.get(p.id) || { id: p.id, umsatz: 0, profit: 0, offen: 0, n: 0 }), ...(rows.has(0) ? [rows.get(0)] : [])];
+  const max = Math.max(1, ...arr.map(a => a.umsatz));
+  return `<div class="card"><h3>Nach Anlaufstelle</h3><div style="display:flex;flex-direction:column;gap:14px">${arr.map(a => `
+    <div><div class="row small" style="justify-content:space-between;gap:6px"><span>${placeTag(a.id || null)} <span class="muted">${a.n} Einträge</span></span><span class="num"><b>${eur(a.umsatz)}</b></span></div>
+      <div style="height:10px;border-radius:5px;background:var(--surface-2);margin-top:5px;overflow:hidden"><div style="height:100%;width:${Math.max(0, a.umsatz / max * 100)}%;background:${placeColor(a.id || null)};border-radius:5px"></div></div>
+      <div class="small muted" style="margin-top:3px">Profit ${eur(a.profit)}${a.offen ? ` · <span class="open">offen ${eur(a.offen)}</span>` : ''}</div></div>`).join('')}</div></div>`;
+}
+function viewStellen(el) {
+  const count = id => S.bookings.filter(b => b.place_id === id).length;
+  const unplaced = S.bookings.filter(b => !b.place_id).length;
+  el.innerHTML = `
+    <div class="card"><h2>Anlaufstellen</h2>
+      <p class="muted" style="margin:0 0 12px">Wo sich deine Kunden melden, z. B. Lottogeschäft oder Handy-Reparatur. Beim Eintragen tippst du die Stelle an. Oben in Tag, Woche, Monat, Auswertung und Offen kannst du jede Stelle getrennt ansehen.</p>
+      ${S.places.length ? `<div class="list">${S.places.map(p => `<div class="item" data-id="${p.id}">
+        <div class="main"><div class="t">${placeTag(p.id)}</div><div class="small muted">${count(p.id)} Einträge</div></div>
+        <div class="actions"><input class="input" value="${esc(p.name)}" maxlength="40" style="max-width:190px;min-height:36px" aria-label="Name von ${esc(p.name)}" data-name>
+          <button class="btn sm" data-rename>Umbenennen</button>${count(p.id) ? '' : '<button class="btn sm danger" data-del>Löschen</button>'}</div></div>`).join('')}</div>`
+        : '<p class="muted" style="margin:0">Noch keine Anlaufstellen angelegt.</p>'}
+    </div>
+    <div class="card"><h3>Neue Anlaufstelle</h3>
+      <form id="pl-form" class="row"><input class="input grow" id="pl-name" maxlength="40" required placeholder="z. B. Lottogeschäft" style="max-width:320px"><button class="btn primary">Anlegen</button></form>
+      <p class="err" id="pl-err" hidden></p></div>
+    ${unplaced && S.places.length ? `<div class="card"><h3>${unplaced} ${unplaced === 1 ? 'Eintrag' : 'Einträge'} ohne Stelle</h3>
+      <p class="muted" style="margin:0 0 10px">Diese Einträge sind von vor den Anlaufstellen. Ordne sie mit einem Tipp gesammelt zu, oder einzeln über den Tag-Reiter.</p>
+      <div class="row">${S.places.map(p => `<button class="btn sm" data-assign="${p.id}">Alle zu ${esc(p.name)}</button>`).join('')}</div></div>` : ''}`;
+  const err = el.querySelector('#pl-err');
+  const show = m => { err.textContent = m; err.hidden = false; };
+  el.querySelector('#pl-form').onsubmit = async ev => {
+    ev.preventDefault(); err.hidden = true;
+    try { const name = el.querySelector('#pl-name').value; const r = await api('savePlace', { u: S.owner.id, name }); S.places = r.places; render(); toast(`Anlaufstelle „${name.trim()}“ angelegt`); }
+    catch (e) { show(e.message); }
+  };
+  el.querySelectorAll('.item[data-id]').forEach(it => {
+    const id = Number(it.dataset.id);
+    it.querySelector('[data-rename]').onclick = async () => {
+      try { const r = await api('savePlace', { u: S.owner.id, id, name: it.querySelector('[data-name]').value }); S.places = r.places; render(); toast('Umbenannt'); }
+      catch (e) { show(e.message); }
+    };
+    const del = it.querySelector('[data-del]');
+    if (del) del.onclick = async () => {
+      if (del.dataset.armed !== '1') { del.dataset.armed = '1'; del.textContent = 'Wirklich löschen?'; return; }
+      try { const r = await api('deletePlace', { u: S.owner.id, id }); S.places = r.places; if (S.place === id) setPlace('all'); render(); toast('Gelöscht'); }
+      catch (e) { show(e.message); }
+    };
+  });
+  el.querySelectorAll('[data-assign]').forEach(btn => btn.onclick = async () => {
+    if (btn.dataset.armed !== '1') { btn.dataset.armed = '1'; btn.textContent = `Ja, ${unplaced} zuordnen`; return; }
+    try { const r = await api('assignUnplaced', { u: S.owner.id, id: Number(btn.dataset.assign) }); await reloadKeepView(); toast(`${r.moved} Einträge zugeordnet`); }
+    catch (e) { show(e.message); }
   });
 }
 
@@ -869,11 +965,11 @@ function viewExport(el) {
 function exportCSV(days, filename) {
   const n = v => String(Math.round((v || 0) * 100) / 100).replace('.', ',');
   const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  const head = ['Datum', 'Spitzname', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
+  const head = ['Datum', 'Gemeldet bei', 'Spitzname', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
   const lines = [head.join(';')];
   for (const d of days) for (const b of dayBookings(d)) {
     const r = calc(b);
-    lines.push([dayDE(d), q(b.nick), ...FIELDS.map(f => n(b[f])), n(b.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), b.status, b.teil === null ? '' : n(b.teil), n(r.offen), q(b.info)].join(';'));
+    lines.push([dayDE(d), q(b.place_id ? placeName(b.place_id) : ''), q(b.nick), ...FIELDS.map(f => n(b[f])), n(b.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), b.status, b.teil === null ? '' : n(b.teil), n(r.offen), q(b.info)].join(';'));
   }
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename.replace(/[^\wäöüÄÖÜß.-]+/g, '_');

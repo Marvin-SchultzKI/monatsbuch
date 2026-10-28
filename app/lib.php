@@ -7,7 +7,7 @@ if (PHP_VERSION_ID < 80000) {
     exit('Monatsbuch braucht PHP 8.0 oder neuer. Bitte im netcup-Kundenbereich die PHP-Version umstellen.');
 }
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const FIELDS = ['c', 'cb', 'w', 'wb', 's', 'sb', 'k', 'kb'];
 
 function app_config(): array
@@ -135,6 +135,18 @@ function migrate(PDO $pdo): void
             FROM entries");
         $pdo->exec("INSERT INTO meta (key, value) VALUES ('migrated_entries_v12', '" . gmdate('c') . "')");
         $pdo->commit();
+    }
+    // Ab 1.3.0: Anlaufstellen („Gemeldet bei“), z. B. Lottogeschäft, Handy-Reparatur
+    $pdo->exec('CREATE TABLE IF NOT EXISTS places (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        sort INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    )');
+    $cols = array_column($pdo->query('PRAGMA table_info(bookings)')->fetchAll(), 'name');
+    if (!in_array('place_id', $cols, true)) {
+        $pdo->exec('ALTER TABLE bookings ADD COLUMN place_id INTEGER NULL');
     }
 }
 

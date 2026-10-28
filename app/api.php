@@ -78,13 +78,14 @@ function route(string $method, string $action, array $in): void
         $uid = target_user($me, $_GET['u'] ?? null);
         $owner = $pdo->prepare('SELECT id, username, display_name, is_admin FROM users WHERE id = ?');
         $owner->execute([$uid]);
-        $e = $pdo->prepare('SELECT id, day, nick, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE user_id = ? ORDER BY day, id');
+        $e = $pdo->prepare('SELECT id, day, nick, place_id, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE user_id = ? ORDER BY day, id');
         $e->execute([$uid]);
         $p = $pdo->prepare('SELECT id, valid_from, c, w, s, k, cb, wb, sb, kb FROM prices WHERE user_id = ? ORDER BY valid_from');
         $p->execute([$uid]);
         $out = [
             'owner' => user_public($owner->fetch()),
             'bookings' => array_map('cast_booking', $e->fetchAll()),
+            'places' => list_places($uid),
             'prices' => array_map('cast_price', $p->fetchAll()),
         ];
         if ($isAdmin) $out['users'] = list_users();
@@ -108,6 +109,13 @@ function route(string $method, string $action, array $in): void
         $row['info'] = mb_substr(trim((string)($in['info'] ?? '')), 0, 500);
         $status = (string)($in['status'] ?? 'bezahlt');
         $row['status'] = $status === 'offen' ? 'offen' : 'bezahlt';
+        $pid = (int)($in['place_id'] ?? 0);
+        if ($pid) {
+            $chk = $pdo->prepare('SELECT 1 FROM places WHERE id = ? AND user_id = ?');
+            $chk->execute([$pid, $uid]);
+            if (!$chk->fetch()) fail('Diese Anlaufstelle gibt es nicht (mehr). Bitte Seite neu laden.');
+        }
+        $row['place_id'] = $pid ?: null;
         $teil = $in['teil'] ?? null;
         $row['teil'] = ($teil === null || $teil === '') ? null : num($teil, 0, 10000000);
         if (!$any && $row['manuell'] == 0 && $row['info'] === '') fail('Bitte mindestens eine Stückzahl, einen Betrag oder eine Info eintragen.');
@@ -125,9 +133,51 @@ function route(string $method, string $action, array $in): void
             $pdo->prepare('INSERT INTO bookings (' . implode(',', $cols) . ') VALUES (:' . implode(',:', $cols) . ')')->execute($row);
             $id = (int)$pdo->lastInsertId();
         }
-        $st = $pdo->prepare('SELECT id, day, nick, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE id = ?');
+        $st = $pdo->prepare('SELECT id, day, nick, place_id, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE id = ?');
         $st->execute([$id]);
         json_out(['ok' => true, 'booking' => cast_booking($st->fetch())]);
+    }
+
+    if ($method === 'POST' && $action === 'savePlace') {
+        $uid = target_user($me, $in['u'] ?? null);
+        $name = trim(preg_replace('/\s+/u', ' ', (string)($in['name'] ?? '')));
+        if ($name === '' || mb_strlen($name) > 40) fail('Name: 1–40 Zeichen.');
+        $id = (int)($in['id'] ?? 0);
+        $dup = $pdo->prepare('SELECT id FROM places WHERE user_id = ? AND name = ? COLLATE NOCASE AND id != ?');
+        $dup->execute([$uid, $name, $id]);
+        if ($dup->fetch()) fail('Diese Anlaufstelle gibt es schon.');
+        if ($id) {
+            $st = $pdo->prepare('UPDATE places SET name = ? WHERE id = ? AND user_id = ?');
+            $st->execute([$name, $id, $uid]);
+            if ($st->rowCount() === 0) fail('Anlaufstelle nicht gefunden.', 404);
+        } else {
+            $n = $pdo->prepare('SELECT COALESCE(MAX(sort), 0) + 1 FROM places WHERE user_id = ?');
+            $n->execute([$uid]);
+            $pdo->prepare('INSERT INTO places (user_id, name, sort, created_at) VALUES (?, ?, ?, ?)')->execute([$uid, $name, (int)$n->fetchColumn(), now_iso()]);
+            $id = (int)$pdo->lastInsertId();
+        }
+        json_out(['ok' => true, 'id' => $id, 'places' => list_places($uid)]);
+    }
+
+    if ($method === 'POST' && $action === 'deletePlace') {
+        $uid = target_user($me, $in['u'] ?? null);
+        $id = (int)($in['id'] ?? 0);
+        $c = $pdo->prepare('SELECT COUNT(*) FROM bookings WHERE user_id = ? AND place_id = ?');
+        $c->execute([$uid, $id]);
+        if ((int)$c->fetchColumn() > 0) fail('An dieser Anlaufstelle hängen noch Einträge. Du kannst sie umbenennen, aber nicht löschen.');
+        $pdo->prepare('DELETE FROM places WHERE id = ? AND user_id = ?')->execute([$id, $uid]);
+        json_out(['ok' => true, 'places' => list_places($uid)]);
+    }
+
+    if ($method === 'POST' && $action === 'assignUnplaced') {
+        $uid = target_user($me, $in['u'] ?? null);
+        $id = (int)($in['id'] ?? 0);
+        $chk = $pdo->prepare('SELECT 1 FROM places WHERE id = ? AND user_id = ?');
+        $chk->execute([$id, $uid]);
+        if (!$chk->fetch()) fail('Anlaufstelle nicht gefunden.', 404);
+        $st = $pdo->prepare('UPDATE bookings SET place_id = ?, updated_at = ? WHERE user_id = ? AND place_id IS NULL');
+        $st->execute([$id, now_iso(), $uid]);
+        json_out(['ok' => true, 'moved' => $st->rowCount()]);
     }
 
     if ($method === 'POST' && $action === 'deleteBooking') {
@@ -319,9 +369,17 @@ function num($v, float $min, float $max): float
     return round($f, 2);
 }
 
+function list_places(int $uid): array
+{
+    $st = db()->prepare('SELECT p.id, p.name, (SELECT COUNT(*) FROM bookings b WHERE b.place_id = p.id) AS n FROM places p WHERE p.user_id = ? ORDER BY p.sort, p.id');
+    $st->execute([$uid]);
+    return array_map(fn($r) => ['id' => (int)$r['id'], 'name' => $r['name'], 'n' => (int)$r['n']], $st->fetchAll());
+}
+
 function cast_booking(array $r): array
 {
     $r['id'] = (int)$r['id'];
+    $r['place_id'] = isset($r['place_id']) ? (int)$r['place_id'] ?: null : null;
     foreach (array_merge(FIELDS, ['manuell']) as $f) $r[$f] = (float)$r[$f];
     $r['teil'] = $r['teil'] === null ? null : (float)$r['teil'];
     return $r;
