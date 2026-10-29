@@ -78,7 +78,7 @@ function route(string $method, string $action, array $in): void
         $uid = target_user($me, $_GET['u'] ?? null);
         $owner = $pdo->prepare('SELECT id, username, display_name, is_admin FROM users WHERE id = ?');
         $owner->execute([$uid]);
-        $e = $pdo->prepare('SELECT id, day, nick, place_id, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE user_id = ? ORDER BY day, id');
+        $e = $pdo->prepare('SELECT id, day, nick, place_id, by_self, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE user_id = ? ORDER BY day, id');
         $e->execute([$uid]);
         $p = $pdo->prepare('SELECT id, valid_from, c, w, s, k, cb, wb, sb, kb FROM prices WHERE user_id = ? ORDER BY valid_from');
         $p->execute([$uid]);
@@ -118,6 +118,10 @@ function route(string $method, string $action, array $in): void
         $row['place_id'] = $pid ?: null;
         $teil = $in['teil'] ?? null;
         $row['teil'] = ($teil === null || $teil === '') ? null : num($teil, 0, 10000000);
+        $row['by_self'] = (array_key_exists('by_self', $in) && !$in['by_self']) ? 0 : 1;
+        if (!$row['by_self']) { // anderer Kassierer: keine Zahlungsdaten, kein manueller Betrag
+            $row['status'] = 'bezahlt'; $row['teil'] = null; $row['manuell'] = 0.0;
+        }
         if (!$any && $row['manuell'] == 0 && $row['info'] === '') fail('Bitte mindestens eine Stückzahl, einen Betrag oder eine Info eintragen.');
         $row['updated_at'] = now_iso();
         $id = (int)($in['id'] ?? 0);
@@ -133,7 +137,7 @@ function route(string $method, string $action, array $in): void
             $pdo->prepare('INSERT INTO bookings (' . implode(',', $cols) . ') VALUES (:' . implode(',:', $cols) . ')')->execute($row);
             $id = (int)$pdo->lastInsertId();
         }
-        $st = $pdo->prepare('SELECT id, day, nick, place_id, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE id = ?');
+        $st = $pdo->prepare('SELECT id, day, nick, place_id, by_self, c, cb, w, wb, s, sb, k, kb, manuell, info, status, teil FROM bookings WHERE id = ?');
         $st->execute([$id]);
         json_out(['ok' => true, 'booking' => cast_booking($st->fetch())]);
     }
@@ -380,6 +384,7 @@ function cast_booking(array $r): array
 {
     $r['id'] = (int)$r['id'];
     $r['place_id'] = isset($r['place_id']) ? (int)$r['place_id'] ?: null : null;
+    $r['by_self'] = isset($r['by_self']) ? (int)$r['by_self'] : 1;
     foreach (array_merge(FIELDS, ['manuell']) as $f) $r[$f] = (float)$r[$f];
     $r['teil'] = $r['teil'] === null ? null : (float)$r['teil'];
     return $r;

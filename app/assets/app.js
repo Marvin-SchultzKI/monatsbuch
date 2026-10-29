@@ -85,7 +85,7 @@ function isDark() {
 function mode() { return isDark() ? 'dark' : 'light'; }
 function monthColor(key) { return MONTH_COLORS[mode()][monthIdx(key)]; }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
-function blankBooking(day) { return { id: 0, day, nick: '', c: 0, cb: 0, w: 0, wb: 0, s: 0, sb: 0, k: 0, kb: 0, manuell: 0, info: '', status: 'bezahlt', teil: null }; }
+function blankBooking(day) { return { id: 0, day, nick: '', by_self: 1, c: 0, cb: 0, w: 0, wb: 0, s: 0, sb: 0, k: 0, kb: 0, manuell: 0, info: '', status: 'bezahlt', teil: null }; }
 const PLACE_COLORS = ['#0B6A86', '#B5517A', '#7F9A00', '#9A5B2E', '#5B4FCF', '#D19A00', '#1D7A4B', '#C2410C'];
 function inPlace(b) { return S.place === 'all' ? true : S.place === 'none' ? !b.place_id : b.place_id === S.place; }
 function visibleBookings() { return S.bookings.filter(inPlace); }
@@ -103,6 +103,9 @@ function indexBookings() {
 function dayBookings(day) { return S.byDay.get(day) || []; }
 function allDays() { return [...S.byDay.keys()].sort(); }
 function nickLabel(n) { return n ? n : 'ohne Name'; }
+function isSelf(b) { return b.by_self !== 0; }
+function newOther() { const o = { n: 0, wert: 0, units: {} }; FIELDS.forEach(f => o.units[f] = 0); return o; }
+function addOther(o, b) { o.n++; o.wert += calc(b).umsatz; FIELDS.forEach(f => o.units[f] += b[f]); }
 function itemsText(b) {
   const parts = FIELDS.filter(f => b[f]).map(f => `${num(b[f])}× ${LABEL[f]}`);
   if (b.manuell) parts.push(`${b.manuell > 0 ? '+' : ''}${eur(b.manuell)} manuell`);
@@ -139,9 +142,10 @@ function calc(e) {
   return { umsatz, einkauf, profit, offen, p };
 }
 function dayTotals(day) {
-  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, n: 0, units: {} };
+  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, n: 0, units: {}, other: newOther() };
   FIELDS.forEach(f => t.units[f] = 0);
   for (const b of dayBookings(day)) {
+    if (!isSelf(b)) { addOther(t.other, b); continue; }
     const r = calc(b);
     t.umsatz += r.umsatz; t.einkauf += r.einkauf; t.profit += r.profit; t.offen += r.offen; t.n++;
     FIELDS.forEach(f => t.units[f] += b[f]);
@@ -149,13 +153,14 @@ function dayTotals(day) {
   return t;
 }
 function sumDays(days) {
-  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, manuell: 0, active: 0, n: 0, best: null, units: {}, catUmsatz: {}, catEinkauf: {}, customers: new Map() };
+  const t = { umsatz: 0, einkauf: 0, profit: 0, offen: 0, manuell: 0, active: 0, n: 0, best: null, units: {}, catUmsatz: {}, catEinkauf: {}, customers: new Map(), other: newOther() };
   FIELDS.forEach(f => t.units[f] = 0);
   CATS.forEach(c => { t.catUmsatz[c.key] = 0; t.catEinkauf[c.key] = 0; });
   for (const d of days) {
     const list = dayBookings(d); if (!list.length) continue;
     let dayU = 0;
     for (const b of list) {
+      if (!isSelf(b)) { addOther(t.other, b); continue; }
       const r = calc(b);
       t.umsatz += r.umsatz; t.einkauf += r.einkauf; t.profit += r.profit; t.offen += r.offen; t.manuell += b.manuell || 0; t.n++;
       dayU += r.umsatz;
@@ -397,12 +402,14 @@ function viewTag(el) {
         ${S.places.length ? `<div class="field">Gemeldet bei
           <div class="seg seg-wrap" role="group" aria-label="Gemeldet bei" id="bk-place">${S.places.map(pl => `<button type="button" data-pid="${pl.id}"><i style="background:${placeColor(pl.id)}"></i>${esc(pl.name)}</button>`).join('')}</div></div>`
           : `<p class="small muted" style="margin:0">Tipp: Unter ☰ → <a href="#stellen">Anlaufstellen</a> legst du an, wo sich Kunden melden (z. B. Lottogeschäft, Handy-Reparatur).</p>`}
+        <div class="field">Gemacht von
+          <div class="seg" role="group" aria-label="Gemacht von" id="bk-who"><button type="button" data-self="1">Selbst</button><button type="button" data-self="0">Anderer Kassierer</button></div></div>
         <label class="field">Spitzname
           <input class="input" id="bk-nick" list="bk-nicks" maxlength="40" placeholder="z. B. Kalle" autocapitalize="words"></label>
         <datalist id="bk-nicks">${knownNicks().map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist>
         <div class="field">Was wurde gekauft? <span class="small muted">Anzahl eintippen, leer = 0</span>
           <div class="qty-grid">${['c', 'w', 's', 'k'].map(qty).join('')}${['cb', 'wb', 'sb', 'kb'].map(qty).join('')}</div></div>
-        <div class="field">Bezahlt?
+        <div class="field" id="bk-paywrap">Bezahlt?
           <div class="seg" role="group" aria-label="Bezahlt" id="bk-status"><button type="button" data-v="bezahlt">bezahlt</button><button type="button" data-v="offen">noch offen</button></div></div>
         <label class="field" id="bk-teil-wrap" hidden>Davon noch offen (€) <span class="small muted">leer = ganzer Betrag offen</span>
           <input class="input mono" id="bk-teil" inputmode="decimal"></label>
@@ -417,17 +424,19 @@ function viewTag(el) {
       </form>
     </div>
     <div class="kpis" id="day-kpis"></div>
+    <div id="day-other"></div>
     <div class="card"><h3>Einträge am ${dayShort(day)}${list.length ? ` <span class="muted">(${list.length})</span>` : ''}</h3>
       ${list.length ? `<div class="list">${list.map(b => { const r = calc(b); return `
         <button type="button" class="bk-item ${editing && editing.id === b.id ? 'sel' : ''}" data-id="${b.id}">
-          <span class="main"><span class="t">${esc(nickLabel(b.nick))}${b.status === 'offen' ? ' <span class="pill offen">offen</span>' : ''}${S.place === 'all' && S.places.length ? ' ' + placeTag(b.place_id) : ''}</span>
+          <span class="main"><span class="t">${esc(nickLabel(b.nick))}${b.status === 'offen' ? ' <span class="pill offen">offen</span>' : ''}${!isSelf(b) ? ' <span class="pill other">anderer Kassierer</span>' : ''}${S.place === 'all' && S.places.length ? ' ' + placeTag(b.place_id) : ''}</span>
             <span class="small muted">${itemsText(b)}${b.info ? ' · ' + esc(b.info) : ''}</span></span>
-          <span class="amt">${eur(r.umsatz)}${r.offen ? `<span class="small open">offen ${eur(r.offen)}</span>` : ''}</span>
+          <span class="amt ${isSelf(b) ? '' : 'dim'}">${eur(r.umsatz)}${r.offen && isSelf(b) ? `<span class="small open">offen ${eur(r.offen)}</span>` : ''}</span>
         </button>`; }).join('')}</div>` : '<p class="muted" style="margin:0">Noch keine Einträge an diesem Tag.</p>'}
     </div>
     <p class="small muted">${p.valid_from ? `Gerechnet mit den Preisen gültig ab ${dayDE(p.valid_from)}.` : 'Noch keine Preise hinterlegt.'}</p>`;
 
   const t = dayTotals(day);
+  document.getElementById('day-other').innerHTML = otherBlock(t.other, 'Andere Kassierer heute');
   document.getElementById('day-kpis').innerHTML = kpi('Umsatz', t.umsatz) + kpi('Einkauf', t.einkauf) + kpi('Profit', t.profit, t.profit < 0 ? 'neg' : 'profit') + kpi('Noch offen', t.offen, t.offen > 0 ? 'open' : 'open zero');
 
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { if (!confirmLeave()) return; setDay(addDays(S.day, +b.dataset.nav)); render(); });
@@ -437,8 +446,14 @@ function viewTag(el) {
   const form = el.querySelector('#bk-form');
   const $ = s => form.querySelector(s);
   let status = 'bezahlt';
-  const setStatus = v => { status = v; form.querySelectorAll('#bk-status button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === v))); $('#bk-teil-wrap').hidden = v !== 'offen'; };
-  let placeId = null;
+  const setStatus = v => { status = v; form.querySelectorAll('#bk-status button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.v === v))); $('#bk-teil-wrap').hidden = v !== 'offen' || !bySelf; };
+  let placeId = null, bySelf = 1;
+  const setWho = v => {
+    bySelf = v ? 1 : 0;
+    form.querySelectorAll('#bk-who button').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.self) === bySelf)));
+    $('#bk-paywrap').hidden = !bySelf; $('#bk-more').hidden = !bySelf;
+    if (!bySelf) $('#bk-teil-wrap').hidden = true; else $('#bk-teil-wrap').hidden = status !== 'offen';
+  };
   const setPlaceSel = id => { placeId = id; form.querySelectorAll('#bk-place button').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.pid) === id))); };
   const lastPlace = () => { try { const v = Number(localStorage.getItem('mb-lastplace-' + S.owner.id)); return placeById(v) ? v : null; } catch { return null; } };
   const fill = b => {
@@ -450,6 +465,7 @@ function viewTag(el) {
     $('#bk-more').open = !!b.manuell;
     $('#bk-teil').value = b.teil !== null && b.teil !== undefined ? numFmt.format(b.teil) : '';
     setStatus(b.status || 'bezahlt');
+    setWho(b.by_self !== 0);
   };
   const read = () => {
     const b = { ...(S.edit || blankBooking(day)), day };
@@ -462,10 +478,13 @@ function viewTag(el) {
     const tr = $('#bk-teil').value.trim(), tv = parseNum(tr);
     if (status === 'offen' && tr !== '') { if (isNaN(tv) || tv < 0) bad = 'Teilbetrag: bitte eine Zahl ab 0'; else b.teil = tv; } else b.teil = null;
     b.status = status; b.info = $('#bk-info').value.trim();
+    b.by_self = bySelf;
+    if (!bySelf) { b.status = 'bezahlt'; b.teil = null; b.manuell = 0; }
     return { b, bad };
   };
   const paintSum = () => {
     const { b } = read(), r = calc(b);
+    if (!bySelf) { $('#bk-sum').innerHTML = `<span>Wert <b class="num">${eur(r.umsatz)}</b></span><span class="muted">zählt nur in „Andere Kassierer“, nicht in Umsatz, Einkauf, Profit</span>`; return; }
     $('#bk-sum').innerHTML = `<span>Umsatz <b class="num">${eur(r.umsatz)}</b></span><span>Einkauf <b class="num">${eur(r.einkauf)}</b></span><span>Profit <b class="num">${eur(r.profit)}</b></span>${status === 'offen' ? `<span class="open">offen <b class="num">${eur(r.offen)}</b></span>` : ''}`;
     $('#bk-teil').placeholder = numFmt.format(r.umsatz);
   };
@@ -474,6 +493,7 @@ function viewTag(el) {
   S.formDirty = false;
   form.addEventListener('input', () => { S.formDirty = true; paintSum(); });
   form.querySelectorAll('#bk-place button').forEach(x => x.onclick = () => { setPlaceSel(Number(x.dataset.pid)); S.formDirty = true; try { localStorage.setItem('mb-lastplace-' + S.owner.id, x.dataset.pid); } catch {} });
+  form.querySelectorAll('#bk-who button').forEach(x => x.onclick = () => { setWho(x.dataset.self === '1'); S.formDirty = true; paintSum(); });
   form.querySelectorAll('#bk-status button').forEach(x => x.onclick = () => { setStatus(x.dataset.v); S.formDirty = true; paintSum(); });
   form.querySelectorAll('.qty input').forEach(inp => inp.addEventListener('focus', () => inp.select()));
   form.onsubmit = async ev => {
@@ -517,16 +537,16 @@ function kpi(label, val, cls = '', delta = '') {
 /* ---------- Übersichtstabelle für Woche und Monat ---------- */
 function summaryTable(days, opts = {}) {
   const today = todayStr();
-  const cells = t => `<td class="num">${eur(t.umsatz)}</td><td class="num dim">${eur(t.einkauf)}</td><td class="num ${t.profit < 0 ? 'neg' : ''}">${eur(t.profit)}</td><td class="num ${t.offen > 0 ? 'open' : 'dim'}">${t.offen ? eur(t.offen) : '–'}</td>`;
+  const cells = t => `<td class="num">${eur(t.umsatz)}</td><td class="num dim">${eur(t.einkauf)}</td><td class="num ${t.profit < 0 ? 'neg' : ''}">${eur(t.profit)}</td><td class="num ${t.offen > 0 ? 'open' : 'dim'}">${t.offen ? eur(t.offen) : '–'}</td><td class="num dim" title="Andere Kassierer (zählt nicht mit)">${t.other.n ? eur(t.other.wert) : '–'}</td>`;
   const rows = days.map(d => {
     const t = dayTotals(d), w = wd(d);
     return `<tr data-day="${d}" class="click ${w === 0 || w === 6 ? 'weekend' : ''} ${d === today ? 'today' : ''} ${t.n ? '' : 'empty'}">
-      <td><a href="#tag" class="daylink" data-open="${d}">${WD[w]} ${dayShort(d)}</a></td><td class="num">${t.n || ''}</td>
+      <td><a href="#tag" class="daylink" data-open="${d}">${WD[w]} ${dayShort(d)}</a></td><td class="num">${(t.n + t.other.n) || ''}</td>
       ${FIELDS.map(f => `<td class="num ${f.endsWith('b') ? 'bon' : ''}">${t.units[f] ? num(t.units[f]) : ''}</td>`).join('')}${cells(t)}</tr>`;
   }).join('');
   const s = sumDays(days);
-  const foot = `<tr><td>Summe</td><td class="num">${s.n || ''}</td>${FIELDS.map(f => `<td class="num">${s.units[f] ? num(s.units[f]) : ''}</td>`).join('')}${cells(s)}</tr>`;
-  return `<div class="table-wrap" style="${opts.maxH ? `max-height:${opts.maxH};` : ''}"><table class="grid"><thead><tr><th class="l">Tag</th><th>Einträge</th>${FIELDS.map(f => `<th class="${f.endsWith('b') ? 'bon' : ''}">${LABEL[f]}</th>`).join('')}<th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Offen</th></tr></thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table></div>`;
+  const foot = `<tr><td>Summe</td><td class="num">${(s.n + s.other.n) || ''}</td>${FIELDS.map(f => `<td class="num">${s.units[f] ? num(s.units[f]) : ''}</td>`).join('')}${cells(s)}</tr>`;
+  return `<div class="table-wrap" style="${opts.maxH ? `max-height:${opts.maxH};` : ''}"><table class="grid"><thead><tr><th class="l">Tag</th><th>Einträge</th>${FIELDS.map(f => `<th class="${f.endsWith('b') ? 'bon' : ''}">${LABEL[f]}</th>`).join('')}<th>Umsatz</th><th>Einkauf</th><th>Profit</th><th>Offen</th><th>Andere</th></tr></thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table></div>`;
 }
 function wireSummary(el) {
   el.querySelectorAll('tr.click').forEach(tr => tr.onclick = ev => { ev.preventDefault(); setDay(tr.dataset.day); S.edit = null; location.hash = 'tag'; });
@@ -585,6 +605,7 @@ function viewWoche(el) {
       <button class="btn" data-nav="7" aria-label="Nächste Woche">›</button>
     </div></div>
     <div class="kpis" id="w-kpis"></div>
+    ${otherBlock(sumDays(days).other, 'Andere Kassierer diese Woche')}
     <div class="card"><h3>Übersicht</h3>${summaryTable(days)}</div>
     <div class="card"><h3>Woche im Diagramm</h3><div id="w-leg"></div><div class="chart-box short"><canvas id="w-chart" aria-label="Umsatz, Einkauf und Profit pro Tag"></canvas></div></div>`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addDays(S.day, +b.dataset.nav)); render(); });
@@ -617,6 +638,7 @@ function viewMonat(el) {
       <button class="btn" data-nav="1" aria-label="Nächster Monat">›</button>
     </div></div>
     <div class="kpis" id="m-kpis"></div>
+    ${otherBlock(sumDays(days).other, 'Andere Kassierer im ' + MONTHS[monthIdx(mk)])}
     <div class="card"><h3>Umsatz, Einkauf und Profit pro Tag</h3>${legend([['Umsatz', col], ['Einkauf', css('--cost')], ['Profit', css('--ink'), true]])}<div class="chart-box"><canvas id="m-chart" aria-label="Tageswerte im ${monthName(mk)}"></canvas></div></div>
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Alle Tage</h3><button class="btn sm" id="m-csv">Monat als CSV</button></div>${summaryTable(days, { maxH: '70vh' })}</div>`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addMonths(mk, +b.dataset.nav) + '-01'); render(); });
@@ -629,6 +651,13 @@ function viewMonat(el) {
     { titles: days.map(d => `${WD[wd(d)]}, ${dayDE(d)}`) });
 }
 
+function otherBlock(o, title = 'Andere Kassierer') {
+  if (!o || !o.n) return '';
+  const parts = FIELDS.filter(f => o.units[f]).map(f => `<span class="ochip"><b class="num">${num(o.units[f])}</b> ${LABEL[f]}</span>`).join('');
+  return `<div class="card other-card"><div class="row" style="justify-content:space-between;gap:8px"><h3 style="margin:0">${title}</h3><span class="num" style="font-weight:600">${eur(o.wert)}</span></div>
+    <p class="small muted" style="margin:4px 0 10px">${o.n} ${o.n === 1 ? 'Eintrag' : 'Einträge'} · zählt nicht in Umsatz, Einkauf und Profit</p>
+    <div class="ochips">${parts || '<span class="muted small">keine Stückzahlen</span>'}</div></div>`;
+}
 function customersBlock(t, title) {
   const arr = [...t.customers.values()].sort((a, b) => b.umsatz - a.umsatz).slice(0, 10);
   return `<div class="card"><h3>${title}</h3>${arr.length ? `<div class="table-wrap"><table class="grid"><thead><tr><th class="l">Spitzname</th><th>Käufe</th><th>Umsatz</th><th>Profit</th><th>Noch offen</th><th>Zuletzt</th></tr></thead><tbody>
@@ -688,6 +717,7 @@ function statsMonth(el) {
       <div class="card"><h3>Profit im Monat aufsummiert</h3>${legend([['Profit kumuliert', col, true]])}<div class="chart-box short"><canvas id="s-cum"></canvas></div></div>
       ${factsBlock(t, days.length)}
     </div>
+    ${otherBlock(t.other, 'Andere Kassierer im ' + MONTHS[monthIdx(mk)])}
     ${placesBlock(days)}
     ${customersBlock(t, 'Kunden im ' + MONTHS[monthIdx(mk)])}`;
   el.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => { setDay(addMonths(mk, +b.dataset.nav) + '-01'); render(); });
@@ -720,6 +750,7 @@ function statsAll(el) {
       <div class="card"><h3>Profit seit Beginn aufsummiert</h3><div class="chart-box short"><canvas id="g-cum"></canvas></div></div>
       ${catBlock(all)}
     </div>
+    ${otherBlock(all.other, 'Andere Kassierer insgesamt')}
     ${placesBlock(allDays())}
     ${customersBlock(all, 'Beste Kunden insgesamt')}
     <div class="card"><div class="row" style="margin-bottom:10px"><h3 class="grow" style="margin:0">Alle Monate</h3><button class="btn sm" id="g-csv">Alles als CSV</button></div>
@@ -744,7 +775,7 @@ function statsAll(el) {
 
 /* ---------- Ansicht: Offen (nach Kunde) ---------- */
 function viewOffen(el) {
-  const open = visibleBookings().filter(b => b.status === 'offen');
+  const open = visibleBookings().filter(b => b.status === 'offen' && isSelf(b));
   const groups = new Map();
   for (const b of open) {
     const g = groups.get(b.nick) || { nick: b.nick, items: [], offen: 0, umsatz: 0 };
@@ -797,7 +828,7 @@ function placesBlock(days) {
   if (S.place !== 'all' || !S.places.length) return '';
   const set = new Set(days), rows = new Map();
   for (const b of S.bookings) {
-    if (!set.has(b.day)) continue;
+    if (!set.has(b.day) || !isSelf(b)) continue;
     const k = b.place_id || 0, r = calc(b), x = rows.get(k) || { id: k, umsatz: 0, profit: 0, offen: 0, n: 0 };
     x.umsatz += r.umsatz; x.profit += r.profit; x.offen += r.offen; x.n++; rows.set(k, x);
   }
@@ -965,11 +996,11 @@ function viewExport(el) {
 function exportCSV(days, filename) {
   const n = v => String(Math.round((v || 0) * 100) / 100).replace('.', ',');
   const q = s => `"${String(s ?? '').replace(/"/g, '""')}"`;
-  const head = ['Datum', 'Gemeldet bei', 'Spitzname', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
+  const head = ['Datum', 'Gemeldet bei', 'Gemacht von', 'Spitzname', ...FIELDS.map(f => LABEL[f]), 'Manuell', 'Umsatz', 'Einkauf', 'Profit', 'Status', 'Teilbetrag offen', 'Noch offen', 'Info'];
   const lines = [head.join(';')];
   for (const d of days) for (const b of dayBookings(d)) {
     const r = calc(b);
-    lines.push([dayDE(d), q(b.place_id ? placeName(b.place_id) : ''), q(b.nick), ...FIELDS.map(f => n(b[f])), n(b.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), b.status, b.teil === null ? '' : n(b.teil), n(r.offen), q(b.info)].join(';'));
+    lines.push([dayDE(d), q(b.place_id ? placeName(b.place_id) : ''), isSelf(b) ? 'selbst' : 'anderer Kassierer', q(b.nick), ...FIELDS.map(f => n(b[f])), n(b.manuell), n(r.umsatz), n(r.einkauf), n(r.profit), b.status, b.teil === null ? '' : n(b.teil), n(r.offen), q(b.info)].join(';'));
   }
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename.replace(/[^\wäöüÄÖÜß.-]+/g, '_');

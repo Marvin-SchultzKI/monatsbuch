@@ -280,3 +280,11 @@ table.grid tr.empty td{color:var(--ink-3)}
 .seg-wrap{display:flex;flex-wrap:wrap;width:100%}
 .seg-wrap button{display:inline-flex;align-items:center;justify-content:center;gap:7px;flex:1 1 auto;min-height:46px;font-size:15px}
 .seg-wrap button[aria-pressed="true"]{background:var(--accent-soft);color:var(--ink);box-shadow:inset 0 -3px 0 var(--accent);font-weight:600}
+
+/* ---------- 1.4: Andere Kassierer ---------- */
+.pill.other{background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
+.bk-item .amt.dim{color:var(--ink-3)}
+.other-card{background:var(--surface-2);box-shadow:none}
+.ochips{display:flex;flex-wrap:wrap;gap:8px}
+.ochip{display:inline-flex;align-items:baseline;gap:5px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:13.5px;color:var(--ink-2)}
+.ochip b{color:var(--ink)}

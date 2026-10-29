@@ -7,7 +7,7 @@ if (PHP_VERSION_ID < 80000) {
     exit('Monatsbuch braucht PHP 8.0 oder neuer. Bitte im netcup-Kundenbereich die PHP-Version umstellen.');
 }
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const FIELDS = ['c', 'cb', 'w', 'wb', 's', 'sb', 'k', 'kb'];
 
 function app_config(): array
@@ -147,6 +147,10 @@ function migrate(PDO $pdo): void
     $cols = array_column($pdo->query('PRAGMA table_info(bookings)')->fetchAll(), 'name');
     if (!in_array('place_id', $cols, true)) {
         $pdo->exec('ALTER TABLE bookings ADD COLUMN place_id INTEGER NULL');
+    }
+    // Ab 1.4.0: selbst gemacht (1) oder anderer Kassierer (0)
+    if (!in_array('by_self', $cols, true)) {
+        $pdo->exec('ALTER TABLE bookings ADD COLUMN by_self INTEGER NOT NULL DEFAULT 1');
     }
 }
 
